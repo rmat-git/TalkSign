@@ -2,7 +2,7 @@
 # --- py v2.py ---
 # hello world, sample text is placed here. ts pmo, sybau
 
-#hello this is a test
+#check test
 
 import sys
 import cv2
