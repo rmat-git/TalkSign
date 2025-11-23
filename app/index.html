@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TalkSign Interface</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+    <div class="app-window">
+        <header class="app-header">
+            <h1>TalkSign</h1>
+        </header>
+
+        <main class="app-content">
+            <div class="video-preview-container">
+                <div class="video-placeholder">
+                    <img src="https://via.placeholder.com/600x400/999999/FFFFFF?text=Webcam+Feed" alt="Webcam Feed Placeholder">
+                    
+                    <div class="text-overlay">
+                        TEXT DISPLAYED HERE
+                    </div>
+                </div>
+
+                <div class="video-controls">
+                    <div class="webcam-selector">
+                        <i class="fas fa-video"></i>
+                        <span>Webcam Camera 1</span>
+                        <i class="fas fa-chevron-down"></i>
+                    </div>
+                    <button class="test-button">TEST</button>
+                </div>
+            </div>
+
+            <div class="customization-sidebar">
+                <h2>Customization</h2>
+                
+                <div class="settings-box text-settings">
+                    <div class="box-header">
+                        <i class="fas fa-cog"></i>
+                    </div>
+                    
+                    <div class="setting-item switch-item">
+                        <label>On-Screen Text</label>
+                        <span class="switch-toggle on">ON</span>
+                    </div>
+
+                    <div class="setting-item slider-item">
+                        <label>Text Size</label>
+                        <div class="slider-control">
+                            <input type="range" min="1" max="100" value="16">
+                            <span>16</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-item slider-item">
+                        <label>Position</label>
+                        <div class="slider-control">
+                            <input type="range" min="1" max="3" value="2">
+                            <span>B</span>
+                        </div>
+                    </div>
+
+                    <div class="settings-actions">
+                        <i class="fas fa-redo-alt"></i>
+                        <button class="save-button">Save Changes</button>
+                    </div>
+                </div>
+
+                <div class="settings-box speech-settings">
+                    <div class="box-header">
+                        <i class="fas fa-microphone"></i>
+                    </div>
+
+                    <div class="setting-item switch-item">
+                        <label>Text to Speech</label>
+                        <span class="switch-toggle on">ON</span>
+                    </div>
+
+                    <div class="setting-item voice-item">
+                        <label>Voice</label>
+                        <div class="voice-control">
+                            <i class="fas fa-volume-up"></i>
+                            <span>M</span>
+                        </div>
+                    </div>
+
+                    <div class="settings-actions">
+                        <i class="fas fa-redo-alt"></i>
+                        <button class="save-button">Save Changes</button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>
