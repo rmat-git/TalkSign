@@ -71,6 +71,11 @@ const App = () => {
   const [selectedCameraId, setSelectedCameraId] = React.useState('');
 
   const [isModelRunning, setIsModelRunning] = React.useState(false);
+  
+  // === NEW STATE & REF FOR PREDICTION ===
+  const [predictedSign, setPredictedSign] = React.useState('...'); 
+  const canvasRef = React.useRef(null);
+  // ======================================
 
   const videoRef = React.useRef(null);
   const isStreaming = !!stream;
@@ -121,7 +126,7 @@ const App = () => {
     };
   }, [getCameraList]);
 
-  // EFFECT 2: Stream Management (Auto-start/Restart stream when selectedCameraId changes)
+  // EFFECT 2: Stream Management
   React.useEffect(() => {
     let currentStream = null;
 
@@ -133,23 +138,14 @@ const App = () => {
 
         if (!deviceId) return;
         
-        // Define the aspect ratio constraint: 16/9 = 1.777...
         const ASPECT_RATIO_16_9 = 1.777777778; 
 
         try {
             const constraints = {
                 video: {
                     deviceId: { exact: deviceId },
-                    
-                    // --------------------------------------------------------------------
-                    // >> CONSTRAINTS: Ideal Resolution, Capped FPS, and ASPECT RATIO <<
-                    // Requests 1080p, and forces the ratio to be 16:9, allowing fallback
-                    // to 1280x720, but not to 4:3 or other ratios.
-                    // --------------------------------------------------------------------
-                    width: { ideal: 1920 }, // Preference for 1080p width
-                    height: { ideal: 1080 }, // Preference for 1080p height
-                    
-                    // NEW: Aspect Ratio Constraint
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 },
                     aspectRatio: { exact: ASPECT_RATIO_16_9 } 
                 },
                 audio: false
@@ -159,12 +155,10 @@ const App = () => {
             currentStream = mediaStream;
             setStream(mediaStream);
 
-            // CRITICAL STEP: Check what the browser actually granted
             if (mediaStream.getVideoTracks().length > 0) {
               const track = mediaStream.getVideoTracks()[0];
               const settings = track.getSettings();
               
-              // Log the granted resolution and FPS
               setGrantedResolution(`${settings.width}x${settings.height} @ ${settings.frameRate} FPS`);
               
               console.log('✅ GRANTED VIDEO SETTINGS (Check this for max quality and 16:9 ratio):', settings);
@@ -173,11 +167,9 @@ const App = () => {
             console.log(`Webcam stream auto-started for device: ${deviceId}`);
 
         } catch (error) {
-            // If aspect ratio or resolution fails, try again without the aspect ratio constraint
             if (error.name === "OverconstrainedError") {
                 console.warn('OverconstrainedError: Failed to get 16:9 aspect ratio with preferred resolution. Trying without 16:9 constraint.');
                 
-                // FALLBACK: Try without the aspect ratio constraint
                 try {
                     const fallbackConstraints = {
                         video: {
@@ -199,7 +191,7 @@ const App = () => {
                       setGrantedResolution(`${settings.width}x${settings.height} @ ${settings.frameRate} FPS (Fallback)`);
                       console.log('✅ GRANTED VIDEO SETTINGS (Fallback):', settings);
                     }
-                    return; // Stop the function here if fallback succeeds
+                    return; 
                 } catch (fallbackError) {
                      console.error('Error accessing media devices for fallback stream:', fallbackError);
                 }
@@ -224,7 +216,7 @@ const App = () => {
     
   }, [selectedCameraId]);
 
-  // EFFECT 3: Handles attaching the stream to the video element after state update
+  // EFFECT 3: Attach stream to video element
   React.useEffect(() => {
     if (stream && videoRef.current) {
       videoRef.current.srcObject = stream;
@@ -242,6 +234,79 @@ const App = () => {
         }
     };
   }, [stream]);
+  
+  // === PREDICTION LOGIC START ===
+  const FLASK_API_URL = 'http://127.0.0.1:5000/api/predict';
+
+  const captureAndPredict = React.useCallback(async () => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+
+      if (!video || !canvas || video.paused || video.ended || video.readyState < 2) {
+          return;
+      }
+
+      // 1. Capture the frame
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      
+      // Draw the video frame onto the canvas
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height); 
+
+      // Get the image data as a Base64 string (image/jpeg for speed)
+      const imageDataURL = canvas.toDataURL('image/jpeg', 0.8);
+      // Remove the prefix before sending
+      const rawBase64 = imageDataURL.split(',')[1];
+
+
+      // 2. Send to Flask API
+      try {
+          const response = await fetch(FLASK_API_URL, {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ image: rawBase64 }),
+          });
+
+          if (response.ok) {
+              const data = await response.json();
+              
+              // === Client-side Console Output ===
+              console.log(`Translation: ${data.result} (Conf: ${data.confidence.toFixed(2)})`);
+              // ===================================
+              
+              setPredictedSign(data.result); 
+          } else {
+              const errorData = await response.json();
+              setPredictedSign(`API Error: ${errorData.error || response.statusText}`);
+              console.error("API Error:", errorData);
+          }
+      } catch (error) {
+          console.error('Prediction API call failed (Is Flask running?):', error);
+          setPredictedSign('Network Error');
+      }
+  }, [FLASK_API_URL]); 
+
+  // EFFECT 4: Prediction Loop (runs when model is toggled ON)
+  React.useEffect(() => {
+      let predictionIntervalId;
+
+      if (isModelRunning && isStreaming) {
+          // Set interval for prediction. 100ms = 10 FPS
+          predictionIntervalId = setInterval(captureAndPredict, 100); 
+      } else {
+          setPredictedSign('...'); 
+      }
+
+      return () => {
+          if (predictionIntervalId) {
+              clearInterval(predictionIntervalId);
+          }
+      };
+  }, [isModelRunning, isStreaming, captureAndPredict]); 
+  // === PREDICTION LOGIC END ===
 
   const toggleModelStatus = () => {
       if (!isStreaming) {
@@ -334,9 +399,8 @@ const App = () => {
           {/* LEFT COLUMN: Main Video/Interaction Area */}
           <div className="md:col-span-2 space-y-6">
             
-            {/* 1. Main Output Area - RESTORED ASPECT-VIDEO CLASS */}
+            {/* 1. Main Output Area */}
             <div className="p-6 bg-white rounded-xl shadow-lg border border-gray-100">
-              {/* Added 'aspect-video' class to enforce 16:9 container size */}
               <div className="w-full bg-gray-900 rounded-lg flex items-center justify-center text-white font-mono text-lg shadow-inner overflow-hidden relative aspect-video"> 
                 
                 {isStreaming ? (
@@ -346,7 +410,6 @@ const App = () => {
                         playsInline
                         muted
                         onLoadedMetadata={handleLoadedMetadata}
-                        // Added 'object-cover' to ensure video fills the 16:9 container
                         className="w-full h-full object-cover rounded-lg transform scale-x-[-1]"
                     />
                 ) : (
@@ -358,10 +421,14 @@ const App = () => {
                         )}
                     </p>
                 )}
+                {/* === NEW: Hidden Canvas for Frame Capture === */}
+                <canvas ref={canvasRef} className="hidden"></canvas>
+                {/* =========================================== */}
+
                 {/* Overlay text for Sign Recognition output */}
                 {isModelRunning && isStreaming && (
                     <div className="absolute top-4 left-4 p-2 bg-black bg-opacity-60 rounded-lg text-white font-bold text-3xl select-none">
-                        <span className="text-green-400">Model Running...</span> (Output: Hello)
+                        <span className="text-green-400">Predicted Sign:</span> <span className="text-white">{predictedSign}</span>
                     </div>
                 )}
               </div>
@@ -423,7 +490,7 @@ const App = () => {
             <div className="p-6 bg-white rounded-xl shadow-lg border border-gray-100">
               <h2 className="text-xl font-bold text-gray-800 mb-2">Model Settings</h2>
               <p className="text-sm text-gray-600 mb-4">
-                Use this section for optional model configuration.
+                Confidence Threshold set to 85% in Flask.
               </p>
               <button className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors duration-200 shadow-md">
                 Open Configuration
@@ -434,6 +501,11 @@ const App = () => {
             <div className="p-6 bg-white rounded-xl shadow-lg border border-gray-100">
               <h2 className="text-xl font-bold text-gray-800 mb-2">Status Log</h2>
               <div className="text-sm space-y-1 text-gray-700">
+                {/* === UPDATED PREDICTED SIGN DISPLAY === */}
+                <p>
+                    Predicted Sign: <span className="font-extrabold text-3xl text-blue-600">{predictedSign}</span>
+                </p>
+                {/* ====================================== */}
                 <p>
                   Model Status:
                   <span className={`font-semibold ${isModelRunning ? 'text-blue-600' : 'text-orange-500'}`}>
