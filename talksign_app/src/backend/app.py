@@ -9,7 +9,7 @@ import os
 import mediapipe as mp # REQUIRED FOR KEYPOINT EXTRACTION
 
 # Import necessary layers from the current Keras installation
-from tensorflow.keras.layers import InputLayer, LSTM, Dense, Dropout
+from keras.layers import InputLayer, LSTM, Dense, Dropout
 
 app = Flask(__name__)
 CORS(app) 
