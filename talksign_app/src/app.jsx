@@ -1,5 +1,4 @@
 import React from 'react';
-
 // Using inline SVG icons for window controls
 const MinimizeIcon = (props) => (
   <svg viewBox="0 0 10 10" className="w-4 h-4" {...props}>
@@ -25,6 +24,24 @@ const CloseIcon = (props) => (
   </svg>
 );
 
+// New Icons for Customization
+const SettingsIcon = (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6 text-gray-800" {...props}>
+        <circle cx="12" cy="12" r="3"></circle>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1.51-1V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+    </svg>
+);
+
+const MicIcon = (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-6 h-6 text-gray-800" {...props}>
+        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+        <line x1="12" y1="19" x2="12" y2="23"></line>
+        <line x1="8" y1="23" x2="16" y2="23"></line>
+    </svg>
+);
+
+// WindowControls component remains the same
 const WindowControls = ({ onMinimize, onMaximize, isMaximized, onClose }) => {
   const baseClasses = "w-10 h-8 flex items-center justify-center transition-colors duration-150 text-gray-700";
   const closeClasses = "hover:bg-red-500 hover:text-white";
@@ -57,6 +74,100 @@ const WindowControls = ({ onMinimize, onMaximize, isMaximized, onClose }) => {
   );
 };
 
+// --- NEW COMPONENT: Customization Card ---
+const CustomizationCard = ({ showOnScreenText, setShowOnScreenText, textSize, setTextSize, textPosition, setTextPosition }) => {
+    // Note: The draft image uses 'B' for Position which is ambiguous, using a slider for percentage position
+    const handleSliderChange = (setter) => (e) => setter(Number(e.target.value));
+    
+    return (
+        <div className="p-6 bg-white rounded-xl shadow-lg border border-gray-100">
+            <div className="flex items-center space-x-2 mb-4">
+                <SettingsIcon />
+                <h2 className="text-xl font-bold text-gray-800">Customization</h2>
+            </div>
+
+            <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                    <span className="text-gray-700">On-Screen Text</span>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" checked={showOnScreenText} onChange={(e) => setShowOnScreenText(e.target.checked)} className="sr-only peer" />
+                        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                        <span className="ml-3 text-sm font-medium text-gray-900">{showOnScreenText ? 'ON' : 'OFF'}</span>
+                    </label>
+                </div>
+                
+                <div>
+                    <div className="flex items-center justify-between mb-1">
+                        <span className="text-gray-700">Text Size</span>
+                        <span className="font-semibold text-gray-900">{textSize}</span>
+                    </div>
+                    <input type="range" min="10" max="48" value={textSize} onChange={handleSliderChange(setTextSize)} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                
+                <div>
+                    <div className="flex items-center justify-between mb-1">
+                        <span className="text-gray-700">Position (from top)</span>
+                        <span className="font-semibold text-gray-900">{textPosition}%</span>
+                    </div>
+                    <input type="range" min="0" max="100" value={textPosition} onChange={handleSliderChange(setTextPosition)} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg" />
+                </div>
+                
+                <div className="flex justify-between items-center pt-2">
+                    <button className="text-gray-600 hover:text-blue-600 transition-colors">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-5 h-5"><path d="M21.5 2v6h-6"/><path d="M21.5 13a9 9 0 1 1-6.5-12"/></svg>
+                    </button>
+                    <button className="px-4 py-2 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 transition-colors">
+                        Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- NEW COMPONENT: Text-to-Speech Card ---
+const TextToSpeechCard = ({ textToSpeechEnabled, setTextToSpeechEnabled, ttsVoice, setTtsVoice }) => {
+    return (
+        <div className="p-6 bg-white rounded-xl shadow-lg border border-gray-100">
+            <div className="flex items-center space-x-2 mb-4">
+                <MicIcon />
+                <h2 className="text-xl font-bold text-gray-800">Text to Speech</h2>
+            </div>
+            
+            <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                    <span className="text-gray-700">Text to Speech</span>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" checked={textToSpeechEnabled} onChange={(e) => setTextToSpeechEnabled(e.target.checked)} className="sr-only peer" />
+                        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                        <span className="ml-3 text-sm font-medium text-gray-900">{textToSpeechEnabled ? 'ON' : 'OFF'}</span>
+                    </label>
+                </div>
+                
+                <div>
+                    <label htmlFor="tts-voice" className="block text-sm font-medium text-gray-700 mb-1">Voice</label>
+                    <select
+                        id="tts-voice"
+                        value={ttsVoice}
+                        onChange={(e) => setTtsVoice(e.target.value)}
+                        className="w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500"
+                    >
+                        <option value="M">Male (Default)</option>
+                        <option value="F">Female</option>
+                        <option value="C">Child</option>
+                    </select>
+                </div>
+
+                <div className="flex justify-end items-center pt-2">
+                    <button className="px-4 py-2 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 transition-colors">
+                        Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 
 const App = () => {
   const [isClosed, setIsClosed] = React.useState(false);
@@ -72,9 +183,16 @@ const App = () => {
 
   const [isModelRunning, setIsModelRunning] = React.useState(false);
   
-  // === NEW STATE & REF FOR PREDICTION ===
+  // === NEW STATE FOR PREDICTION & UI CUSTOMIZATION ===
   const [predictedSign, setPredictedSign] = React.useState('...'); 
   const canvasRef = React.useRef(null);
+  
+  // UI Customization State
+  const [showOnScreenText, setShowOnScreenText] = React.useState(true);
+  const [textSize, setTextSize] = React.useState(32); // Increased default for visibility
+  const [textPosition, setTextPosition] = React.useState(80); // 80% from top (bottom area)
+  const [textToSpeechEnabled, setTextToSpeechEnabled] = React.useState(true);
+  const [ttsVoice, setTtsVoice] = React.useState('M'); 
   // ======================================
 
   const videoRef = React.useRef(null);
@@ -110,6 +228,7 @@ const App = () => {
 
   // EFFECT 1: Load cameras on mount
   React.useEffect(() => {
+    // Permission check and initial camera list load
     navigator.mediaDevices.getUserMedia({ video: true, audio: false })
         .then(stream => {
             stream.getTracks().forEach(track => track.stop());
@@ -278,6 +397,19 @@ const App = () => {
               // ===================================
               
               setPredictedSign(data.result); 
+
+              // *** NEW: Implement Text-to-Speech logic here ***
+              if (textToSpeechEnabled && data.result !== '...') {
+                  if ('speechSynthesis' in window) {
+                      const utterance = new SpeechSynthesisUtterance(data.result);
+                      // In a real app, you'd select the voice based on ttsVoice state
+                      window.speechSynthesis.speak(utterance);
+                  } else {
+                      // Only warn once in a real implementation
+                      console.warn("Text-to-Speech not supported in this browser.");
+                  }
+              }
+              // ************************************************
           } else {
               const errorData = await response.json();
               setPredictedSign(`API Error: ${errorData.error || response.statusText}`);
@@ -287,7 +419,7 @@ const App = () => {
           console.error('Prediction API call failed (Is Flask running?):', error);
           setPredictedSign('Network Error');
       }
-  }, [FLASK_API_URL]); 
+  }, [FLASK_API_URL, textToSpeechEnabled]); // textToSpeechEnabled added as a dependency
 
   // EFFECT 4: Prediction Loop (runs when model is toggled ON)
   React.useEffect(() => {
@@ -335,6 +467,14 @@ const App = () => {
     setIsClosed(true);
     console.log('Window closed. Stream and Model stopped.');
   };
+  
+  // *** NEW: Placeholder Test Function for the TEST button in the draft ***
+  const handleTest = () => {
+      console.log("TEST button clicked. In a real application, this might trigger a connectivity or latency test.");
+      alert('Test button clicked! Check console for more details.');
+  };
+  // **********************************************************************
+
 
   if (isClosed) {
     return (
@@ -368,6 +508,14 @@ const App = () => {
   const mainContentLayoutClasses = isMaximized
     ? "max-w-full mx-auto w-full px-6 py-8 transition-all duration-300"
     : "max-w-7xl mx-auto w-full px-6 py-8 transition-all duration-300";
+
+  // *** NEW: Calculate prediction text style based on state ***
+  const predictedTextStyle = {
+    fontSize: `${textSize}px`,
+    top: `${textPosition}%`,
+    transform: `translateY(-${textPosition}%)`,
+  };
+  // ************************************************************
 
   return (
     <div className={mainWrapperClasses}>
@@ -425,110 +573,110 @@ const App = () => {
                 <canvas ref={canvasRef} className="hidden"></canvas>
                 {/* =========================================== */}
 
-                {/* Overlay text for Sign Recognition output */}
-                {isModelRunning && isStreaming && (
-                    <div className="absolute top-4 left-4 p-2 bg-black bg-opacity-60 rounded-lg text-white font-bold text-3xl select-none">
-                        <span className="text-green-400">Predicted Sign:</span> <span className="text-white">{predictedSign}</span>
+                {/* Overlay text for Sign Recognition output - UPDATED POSITIONING & STYLES */}
+                {isModelRunning && isStreaming && showOnScreenText && (
+                    // Applying custom dynamic styles for size and position
+                    <div 
+                        className="absolute w-full px-6 flex items-center justify-center pointer-events-none"
+                        style={predictedTextStyle}
+                    >
+                        <span className="p-2 bg-black bg-opacity-70 rounded-lg text-white font-extrabold text-center select-none shadow-xl">
+                            {predictedSign}
+                        </span>
                     </div>
                 )}
+                
+                {/* Overlay Webcam Selector and TEST Button - Based on draft image */}
+                <div className="absolute bottom-4 left-4 flex items-center space-x-2">
+                    {/* Webcam Select Group (Simplified to match the visual draft layout) */}
+                    <div className="relative">
+                        <select
+                            id="webcam-select-overlay"
+                            className="bg-gray-800 bg-opacity-70 text-white text-sm py-1 pl-8 pr-3 border border-gray-700 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500"
+                            value={selectedCameraId}
+                            onChange={(e) => setSelectedCameraId(e.target.value)}
+                        >
+                            {availableCameras.length === 0 ? (
+                              <option disabled value="">
+                                Loading...
+                              </option>
+                            ) : (
+                              availableCameras.map(camera => (
+                                <option key={camera.deviceId} value={camera.deviceId}>
+                                  {camera.label || `Camera (${camera.deviceId.substring(0, 8)}...)`}
+                                </option>
+                              ))
+                            )}
+                        </select>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4 text-white absolute left-2 top-1/2 transform -translate-y-1/2 pointer-events-none">
+                            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+                            <circle cx="12" cy="13" r="4"></circle>
+                        </svg>
+                    </div>
+
+                    <button
+                        onClick={handleTest}
+                        className="px-4 py-1 bg-green-500 text-white font-semibold text-sm rounded-lg hover:bg-green-600 transition-colors"
+                    >
+                        TEST
+                    </button>
+                </div>
               </div>
             </div>
             
-            {/* 2. Controls Area (Webcam Selector and Start TalkSign Button) */}
+            {/* 2. Controls Area - Replacing with Status Log based on original code structure */}
             <div className="p-6 bg-white rounded-xl shadow-lg border border-gray-100">
-              <div className="flex flex-col md:flex-row gap-4 items-end justify-between">
-                
-                {/* Webcam Select Group */}
-                <div className="w-full md:max-w-xs">
-                  <label htmlFor="webcam-select" className="block text-sm font-medium text-gray-700 mb-1">
-                    Select Webcam (Stream Status:
-                    <span className={`font-semibold ${isStreaming ? 'text-green-600' : 'text-orange-500'}`}>
-                      {isStreaming ? ' Active' : ' Inactive'}
-                    </span>)
-                  </label>
-                  <select
-                    id="webcam-select"
-                    className="w-full p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500"
-                    value={selectedCameraId}
-                    onChange={(e) => setSelectedCameraId(e.target.value)}
-                  >
-                    {availableCameras.length === 0 ? (
-                      <option disabled value="">
-                        {isStreaming ? "Streaming" : "Loading Cameras..."}
-                      </option>
-                    ) : (
-                      availableCameras.map(camera => (
-                        <option key={camera.deviceId} value={camera.deviceId}>
-                          {camera.label || `Camera (${camera.deviceId.substring(0, 8)}...)`}
-                        </option>
-                      ))
-                    )}
-                  </select>
+                <h2 className="text-xl font-bold text-gray-800 mb-2">Model Status</h2>
+                <div className="flex justify-between items-center">
+                    <button
+                        onClick={toggleModelStatus}
+                        className={`w-48 px-6 py-2.5 font-semibold rounded-lg transition-colors duration-200 shadow-md ${
+                            isModelRunning
+                                ? 'bg-red-600 text-white hover:bg-red-700'
+                                : 'bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed'
+                        }`}
+                        disabled={!isStreaming}
+                    >
+                        {isModelRunning ? 'Stop TalkSign' : 'Start TalkSign'}
+                    </button>
+                    <div className="text-sm space-y-1 text-gray-700">
+                        <p>
+                            Model Status:
+                            <span className={`font-semibold ${isModelRunning ? 'text-blue-600' : 'text-orange-500'}`}>
+                                {isModelRunning ? ' Running' : ' Ready'}
+                            </span>
+                        </p>
+                        <p>
+                            Granted Resolution: <span className={`font-semibold ${grantedResolution && grantedResolution.includes("Failed") ? 'text-red-500' : 'text-blue-500'}`}>{grantedResolution || 'N/A'}</span>
+                        </p>
+                        {videoAspect && (
+                          <p>
+                            Video Aspect/Res: <span className="font-semibold text-blue-500">{videoAspect}</span>
+                          </p>
+                        )}
+                    </div>
                 </div>
-
-                {/* Start/Stop TalkSign Button */}
-                <button
-                    onClick={toggleModelStatus}
-                    className={`w-full md:w-auto px-6 py-2.5 font-semibold rounded-lg transition-colors duration-200 shadow-md ${
-                        isModelRunning
-                            ? 'bg-red-600 text-white hover:bg-red-700'
-                            : 'bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed'
-                    }`}
-                    disabled={!isStreaming}
-                >
-                    {isModelRunning ? 'Stop TalkSign' : 'Start TalkSign'}
-                </button>
-              </div>
             </div>
 
           </div>
 
-          {/* RIGHT COLUMN: Sidebar / Controls */}
+          {/* RIGHT COLUMN: Sidebar / Controls - Replacing original cards with new components */}
           <div className="md:col-span-1 space-y-6">
+            <CustomizationCard
+                showOnScreenText={showOnScreenText}
+                setShowOnScreenText={setShowOnScreenText}
+                textSize={textSize}
+                setTextSize={setTextSize}
+                textPosition={textPosition}
+                setTextPosition={setTextPosition}
+            />
             
-            {/* Model Settings Card */}
-            <div className="p-6 bg-white rounded-xl shadow-lg border border-gray-100">
-              <h2 className="text-xl font-bold text-gray-800 mb-2">Model Settings</h2>
-              <p className="text-sm text-gray-600 mb-4">
-                Confidence Threshold set to 85% in Flask.
-              </p>
-              <button className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition-colors duration-200 shadow-md">
-                Open Configuration
-              </button>
-            </div>
-
-            {/* Status Log Card */}
-            <div className="p-6 bg-white rounded-xl shadow-lg border border-gray-100">
-              <h2 className="text-xl font-bold text-gray-800 mb-2">Status Log</h2>
-              <div className="text-sm space-y-1 text-gray-700">
-                {/* === UPDATED PREDICTED SIGN DISPLAY === */}
-                <p>
-                    Predicted Sign: <span className="font-extrabold text-3xl text-blue-600">{predictedSign}</span>
-                </p>
-                {/* ====================================== */}
-                <p>
-                  Model Status:
-                  <span className={`font-semibold ${isModelRunning ? 'text-blue-600' : 'text-orange-500'}`}>
-                      {isModelRunning ? ' Running' : ' Ready'}
-                  </span>
-                </p>
-                <p>User ID: <span className="font-mono text-gray-500">...</span></p>
-                <p>
-                  Input Stream: <span className={`font-semibold ${isStreaming ? 'text-green-500' : 'text-gray-500'}`}>{isStreaming ? ' Active' : ' Inactive'}</span>
-                </p>
-                {/* Display GRANTED resolution (Crucial for debugging) */}
-                <p>
-                  Granted Resolution: <span className={`font-semibold ${grantedResolution && grantedResolution.includes("Failed") ? 'text-red-500' : 'text-blue-500'}`}>{grantedResolution || 'N/A'}</span>
-                </p>
-                {/* Display actual element resolution */}
-                {videoAspect && (
-                  <p>
-                    Video Aspect/Res: <span className="font-semibold text-blue-500">{videoAspect}</span>
-                  </p>
-                )}
-              </div>
-            </div>
-
+            <TextToSpeechCard
+                textToSpeechEnabled={textToSpeechEnabled}
+                setTextToSpeechEnabled={setTextToSpeechEnabled}
+                ttsVoice={ttsVoice}
+                setTtsVoice={setTtsVoice}
+            />
           </div>
         </div>
       </main>
