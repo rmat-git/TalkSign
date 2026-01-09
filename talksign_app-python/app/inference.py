@@ -1,121 +1,94 @@
 import os
-import time
 import numpy as np
 import tensorflow as tf
 
 # --- CONFIGURATION ---
-MODEL_PATH = '../model/asl_alphabet_model.keras'  # .keras file or SavedModel folder
+# Note: Ensure this path is correct relative to where you run main.py
+MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'model', 'asl_alphabet_model.keras')
 
+# Centralized list of supported gestures/actions
 ACTIONS = [
     'A','B','C','D','E','F','G','H','I','J','K','L','M','N',
     'O','P','Q','R','S','T','U','V','W','X','Y','Z',
     'SPACE','DELETE','NOTHING'
 ]
-SEQUENCE_LENGTH = 30
-LANDMARK_DIM = 63
 
 class InferenceModel:
-    """Loads a gesture recognition model using tf.keras or SavedModel, with fallback MOCK."""
-
+    """
+    Handles only the Loading and Execution of the Neural Network.
+    Feature extraction and geometry are now handled by the Engine layer.
+    """
     def __init__(self, log_callback=print):
         self.log = log_callback
         self.model = None
         self.is_saved_model = False
+        # The model is usually loaded explicitly by main.py, 
+        # but calling it here ensures it's ready if used standalone.
         self.load_model()
 
-    def load_model(self):
-        """Detects and loads either a .keras/.h5 file or a SavedModel folder."""
-        if not os.path.exists(MODEL_PATH):
-            self.log(f"ERROR: Model path not found at {MODEL_PATH}. Using MOCK.")
-            self._set_mock_model()
-            return
+    def load_model(self, custom_path=None):
+            """Loads the model from disk or falls back to Mock mode if not found."""
+            target_path = custom_path if custom_path else MODEL_PATH
+            
+            if not os.path.exists(target_path):
+                self.log(f"Model not found at {target_path}. Using mock mode.")
+                self._set_mock_model()
+                return
 
-        try:
-            if os.path.isdir(MODEL_PATH):
-                # SavedModel folder
-                self.model = tf.saved_model.load(MODEL_PATH)
-                self.model = self.model.signatures['serving_default']
-                self.is_saved_model = True
-                self.log(f"Loaded SavedModel from {MODEL_PATH}")
-            elif MODEL_PATH.endswith(('.keras', '.h5')):
-                # .keras or .h5 file
-                self.model = tf.keras.models.load_model(MODEL_PATH, compile=False)
-                self.model.compile(
-                    optimizer='adam',
-                    loss='categorical_crossentropy',
-                    metrics=['categorical_accuracy']
-                )
-                self.is_saved_model = False
-                self.log(f"Loaded .keras model from {MODEL_PATH}")
-            else:
-                raise ValueError("Unknown model format. Must be .keras, .h5, or SavedModel folder.")
-        except Exception as e:
-            self.log(f"CRITICAL ERROR loading model: {e}. Falling back to MOCK.")
-            self._set_mock_model()
+            try:
+                # Check if it's a folder (SavedModel) or a file (.keras/.h5)
+                if os.path.isdir(target_path):
+                    self.model = tf.saved_model.load(target_path)
+                    self.is_saved_model = True
+                else:
+                    self.model = tf.keras.models.load_model(target_path, compile=False)
+                    self.is_saved_model = False
+                
+                self.log(f"Model loaded successfully from {target_path}")
+            except Exception as e:
+                self.log(f"Load Error: {e}. Falling back to mock.")
+                self._set_mock_model()
 
     def _set_mock_model(self):
-        """Sets a mock model for testing without a real model."""
-        time.sleep(0.5)
-        self.model = True  # MOCK flag
-        self.log("Mock model ready.")
+        """Enables development without a GPU or model file present."""
+        self.model = True 
+        self.log("Backend: Running in MOCK mode (Random Predictions).")
 
-    def predict_action(self, sequence):
-        """Runs prediction on a single input sequence."""
+    def get_raw_prediction(self, input_array):
+        """
+        Takes a processed numpy array (shape 1, 80) and returns the softmax probabilities.
+        """
         if self.model is True:
-            # MOCK prediction
-            idx = np.random.randint(0, len(ACTIONS))
-            confidence = 90 + np.random.rand() * 10
-            return ACTIONS[idx], confidence
-
-        if self.model is None:
-            return "No Model Loaded", 0.0
+            res = np.random.dirichlet(np.ones(len(ACTIONS)), size=1)[0]
+            return res
 
         try:
-            # 1. Standardize Sequence Input
-            seq_array = np.array(sequence, dtype=np.float32)
-            
-            # **FIX:** Check if input is accidentally batched (e.g., shape (1, 30, 63) or (1, 1, 63))
-            if seq_array.ndim > 2 and seq_array.shape[0] == 1:
-                seq_array = seq_array[0]
-            
-            # 2. Extract the Single Frame (63 features)
-            # Take the LAST frame if it's a sequence, or the array itself if it's already (63,)
-            if seq_array.ndim == 2:
-                single_frame_array = seq_array[-1, :] # Shape (63,)
-            else: # Must be (63,)
-                single_frame_array = seq_array
-                
-
-            # 3. Add the Batch Dimension for the model (1, 63)
-            input_array = np.expand_dims(single_frame_array, axis=0) # Shape is (1, 63)
-            
             if self.is_saved_model:
-                # SavedModel expects tf.Tensor input
                 input_tensor = tf.constant(input_array, dtype=tf.float32)
                 predictions = list(self.model(input_tensor).values())[0].numpy()
-                res = predictions[0]
+                return predictions[0]
             else:
-                # .keras model expects numpy array input
-                res = self.model.predict(input_array)[0]
-
-            idx = np.argmax(res)
-            confidence = res[idx] * 100
-            return ACTIONS[idx], confidence
+                return self.model.predict(input_array, verbose=0)[0]
         except Exception as e:
-            self.log(f"Prediction ERROR: {e}")
-            return "Prediction Failed", 0.0
+            self.log(f"Model Execution Error: {e}")
+            return None
 
 # -------------------------
 # Example usage:
-
 if __name__ == "__main__":
     def logger(msg):
         print("[LOG]", msg)
 
-    model = InferenceModel(log_callback=logger)
+    # 1. Initialize
+    model_wrapper = InferenceModel(log_callback=logger)
 
-    # Example mock input
-    dummy_input = np.random.rand(1, 63).astype(np.float32)
+    # 2. Create mock input of 80 features (as expected by the Alphabet model)
+    # Shape: (batch_size=1, features=80)
+    dummy_input = np.random.rand(1, 80).astype(np.float32)
 
-    action, conf = model.predict_action(dummy_input)
-    print(f"Predicted action: {action} ({conf:.2f}%)")
+    # 3. Use the new method name
+    raw_res = model_wrapper.get_raw_prediction(dummy_input)
+    
+    if raw_res is not None:
+        idx = np.argmax(raw_res)
+        print(f"Predicted action: {ACTIONS[idx]} ({raw_res[idx]*100:.2f}%)")

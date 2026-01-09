@@ -103,6 +103,20 @@ class AppGUI:
         menu = tk.OptionMenu(parent, self.camera_id_var, *self.camera_options)
         menu.config(width=20)
         menu.pack(side=tk.LEFT, padx=10)
+        
+        # --- NEW TOGGLE BUTTON ---
+        self.mode_var = tk.StringVar(value="Alphabet")
+        self.mode_btn = tk.Button(
+            parent,
+            textvariable=self.mode_var,
+            command=self.toggle_prediction_mode,
+            width=12,
+            bg="#9b59b6", # Purple for Alphabet
+            fg="white",
+            font=('Helvetica', 10, 'bold'),
+            cursor="hand2"
+        )
+        self.mode_btn.pack(side=tk.LEFT, padx=5)
 
         # --- NEW START BUTTON (FAR RIGHT) ---
         self.start_virtual_btn = tk.Button(
@@ -115,6 +129,37 @@ class AppGUI:
             command=self._handle_virtual_start
         )
         self.start_virtual_btn.pack(side=tk.RIGHT, padx=5)
+
+    def toggle_prediction_mode(self):
+        """Swaps between Alphabet and Word recognition modes."""
+        
+        # 1. Define the paths (Double check these match your actual filenames)
+        ALPHA_PATH = '../model/asl_alphabet_model.keras'
+        WORD_PATH = '../model/word_model.keras' # Using the filename from your notebook
+
+        if self.mode_var.get() == "Alphabet":
+            self.update_log("Switching to WORD mode...")
+            self.mode_var.set("Words")
+            self.mode_btn.config(bg="#2ecc71") # Green for Words
+            
+            # 2. Tell the model wrapper to load the Word file
+            # Note: main.py passes the model as 'inference_model' 
+            # If you don't have self.inference_model, use self.camera_processor.model_wrapper
+            self.camera_processor.model_wrapper.load_model(WORD_PATH)
+            
+            # 3. Use the helper method we added to camera.py to swap the engine
+            self.camera_processor.set_engine("word")
+            
+        else:
+            self.update_log("Switching to ALPHABET mode...")
+            self.mode_var.set("Alphabet")
+            self.mode_btn.config(bg="#9b59b6") # Purple for Alphabet
+            
+            # 2. Tell the model wrapper to load the Alphabet file
+            self.camera_processor.model_wrapper.load_model(ALPHA_PATH)
+            
+            # 3. Swap the engine back to alphabet
+            self.camera_processor.set_engine("alphabet")
 
 
     def _handle_virtual_start(self):
