@@ -4,7 +4,7 @@ from app.camera import CameraProcessor
 from app.virtual_cam import VirtualCamManager
 import time
 import cv2
-
+import os  # Added OS for path handling
 
 # --- DEFAULT SETTINGS ---
 DEFAULT_TEXT_COLOR = "#FFFFFF"
@@ -43,7 +43,15 @@ class AppGUI:
         self.vcam_manager = VirtualCamManager(self.video_width, self.video_height)
 
         # Camera initialization
-        initial_camera_id = int(self.camera_id_var.get().split(":")[0])
+        # Check if cameras exist, fallback to 0 if list is empty or weird
+        if self.camera_options:
+            try:
+                initial_camera_id = int(self.camera_id_var.get().split(":")[0])
+            except:
+                initial_camera_id = 0
+        else:
+            initial_camera_id = 0
+
         self.camera_processor = CameraProcessor(
             self.video_canvas,
             inference_model,
@@ -65,9 +73,6 @@ class AppGUI:
         self.master.bind("<Escape>", self._keyboard_clear_sentence)
         self.master.bind("<BackSpace>", self._keyboard_backspace)
         # --------------------------------------
-
-        master.after(100, self._start_initial_camera)
-
 
     # ----------------------------------------------------------
     # LEFT COLUMN
@@ -97,6 +102,9 @@ class AppGUI:
         tk.Label(parent, text="📷 Select Camera:", bg="#e0e0e0").pack(side=tk.LEFT)
 
         self.camera_options = self.find_cameras()
+        if not self.camera_options:
+            self.camera_options = ["0: Default"]
+            
         self.camera_id_var = tk.StringVar(value=self.camera_options[0])
         self.camera_id_var.trace_add("write", self._on_camera_change)
 
@@ -131,35 +139,30 @@ class AppGUI:
         self.start_virtual_btn.pack(side=tk.RIGHT, padx=5)
 
     def toggle_prediction_mode(self):
-        """Swaps between Alphabet and Word recognition modes."""
-        
-        # 1. Define the paths (Double check these match your actual filenames)
-        ALPHA_PATH = '../model/asl_alphabet_model.keras'
-        WORD_PATH = '../model/word_model.keras' # Using the filename from your notebook
+            """Swaps between Alphabet and Word recognition modes."""
+            
+            # JUST USE FILENAMES - NO PATHS
+            # The new inference.py will automatically look inside the 'model' folder
+            ALPHA_FILE = 'asl_alphabet_model.keras'
+            WORD_FILE = 'word_model.keras'
 
-        if self.mode_var.get() == "Alphabet":
-            self.update_log("Switching to WORD mode...")
-            self.mode_var.set("Words")
-            self.mode_btn.config(bg="#2ecc71") # Green for Words
-            
-            # 2. Tell the model wrapper to load the Word file
-            # Note: main.py passes the model as 'inference_model' 
-            # If you don't have self.inference_model, use self.camera_processor.model_wrapper
-            self.camera_processor.model_wrapper.load_model(WORD_PATH)
-            
-            # 3. Use the helper method we added to camera.py to swap the engine
-            self.camera_processor.set_engine("word")
-            
-        else:
-            self.update_log("Switching to ALPHABET mode...")
-            self.mode_var.set("Alphabet")
-            self.mode_btn.config(bg="#9b59b6") # Purple for Alphabet
-            
-            # 2. Tell the model wrapper to load the Alphabet file
-            self.camera_processor.model_wrapper.load_model(ALPHA_PATH)
-            
-            # 3. Swap the engine back to alphabet
-            self.camera_processor.set_engine("alphabet")
+            if self.mode_var.get() == "Alphabet":
+                self.update_log("Switching to WORD mode...")
+                self.mode_var.set("Words")
+                self.mode_btn.config(bg="#2ecc71") 
+                
+                # Load Word Model
+                self.camera_processor.model_wrapper.load_model(WORD_FILE)
+                self.camera_processor.set_engine("word")
+                
+            else:
+                self.update_log("Switching to ALPHABET mode...")
+                self.mode_var.set("Alphabet")
+                self.mode_btn.config(bg="#9b59b6") 
+                
+                # Load Alphabet Model
+                self.camera_processor.model_wrapper.load_model(ALPHA_FILE)
+                self.camera_processor.set_engine("alphabet")
 
 
     def _handle_virtual_start(self):
@@ -393,7 +396,7 @@ class AppGUI:
                 name = "Webcam" if i == 0 else f"Camera {i}"
                 cams.append(f"{i}: {name}")
                 cap.release()
-        return cams if cams else ["0: Default Camera"]
+        return cams if cams else []
 
 
     # ----------------------------------------------------------

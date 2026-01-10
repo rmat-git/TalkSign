@@ -5,12 +5,11 @@ from PIL import Image, ImageTk, ImageDraw, ImageFont
 import time
 import threading
 from queue import Queue, Empty
-import pygame
-import pyttsx3
 import os
-from pygame import mixer
-import pygame._sdl2.audio as sdl2_audio
-#skeleton
+
+# NOTE: Audio imports removed from here to speed up launch time
+
+# skeleton
 import mediapipe as mp
 mp_drawing = mp.solutions.drawing_utils
 mp_holistic = mp.solutions.holistic
@@ -30,16 +29,17 @@ class CameraProcessor:
     def __init__(self, canvas, inference_model, log_callback,
                  width=480, height=320, camera_id=0):
         self.canvas = canvas
-        self.model_wrapper = inference_model # renamed for clarity
+        self.model_wrapper = inference_model
         self.log = log_callback
         self.width = width
         self.height = height
         self.camera_id = camera_id
         
-        # --- NEW ENGINE INITIALIZATION ---
-        # Instead of calling the model directly, we use the engine
+        # --- AUDIO STABILITY LOCK ---
+        # Keeps the app safe from crashes, but doesn't slow down startup
+        self.audio_lock = threading.Lock() 
+        
         self.engine = AlphabetEngine(self.model_wrapper)
-        # ---------------------------------
 
         self.vcam_manager = None
         self.tts_enabled = True
@@ -103,56 +103,42 @@ class CameraProcessor:
         self.holistic = mp_holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.log("MediaPipe initialized.")
 
-        self.prediction_history = []  # This stores the last 5 predictions
+        self.prediction_history = []
         self.STABILITY_FRAMES = 5  
         
     def set_engine(self, engine_type):
-        """Swaps the active engine and resets buffers."""
-        from app.engine import AlphabetEngine, WordEngine
-        
-        if engine_type == "alphabet":
-            self.engine = AlphabetEngine(self.model_wrapper)
-            self.log("Engine Switched: ALPHABET (Letters)")
-        elif engine_type == "word":
-            self.engine = WordEngine(self.model_wrapper)
-            self.log("Engine Switched: WORDS (Full Gestures)")
-        
-        # Reset sentence and internal frame counters to prevent glitches
-        self.frame_count = 0
-        self.sentence = ""
-        self.current_action = "..."
-        self.current_confidence = 0.0
+            """Swaps the active engine and resets all text/buffers."""
+            from app.engine import AlphabetEngine, WordEngine
+            
+            if engine_type == "alphabet":
+                self.engine = AlphabetEngine(self.model_wrapper)
+                self.log("Engine Switched: ALPHABET")
+            elif engine_type == "word":
+                self.engine = WordEngine(self.model_wrapper)
+                self.log("Engine Switched: WORDS")
+            
+            self.sentence = ""
+            self.draft_text = ""
+            self.prediction_history = []
+            self.frame_count = 0
+            self.current_action = "..."
+            self.current_confidence = 0.0
 
-    # ... (Keep apply_custom_text_settings, start_feed, stop_feed as they are) ...
     def apply_custom_text_settings(self, enabled, color, size, y, effect):
-        """
-        Called by GUI to push live settings.
-        - enabled: bool
-        - color: hex color string (e.g. "#FFFFFF")
-        - size: int or string convertible to int
-        - y: pixel Y position for the baseline (anchor='s')
-        - effect: "none" | "shadow" | "outline"
-        """
         try:
             self.text_enabled = bool(enabled)
-            # Keep color as-is (expecting hex like "#RRGGBB")
-            if color is None:
-                color = "#FFFFFF"
+            if color is None: color = "#FFFFFF"
             self.text_color = str(color)
             self.text_size = int(size)
-            # clamp y to canvas
             y_pix = int(y)
-            if y_pix < 0:
-                y_pix = 0
-            if y_pix > self.height:
-                y_pix = self.height
+            if y_pix < 0: y_pix = 0
+            if y_pix > self.height: y_pix = self.height
             self.text_y = y_pix
             if effect in ("none", "shadow", "outline"):
                 self.text_effect = effect
             else:
                 self.text_effect = "none"
 
-            # Update fonts for helper items so outline/shadow sizes stay consistent
             font_spec = ('Helvetica', self.text_size, 'bold')
             self.canvas.itemconfig(self.sentence_text_id, font=font_spec)
             self.canvas.itemconfig(self._shadow_item, font=font_spec)
@@ -162,9 +148,6 @@ class CameraProcessor:
         except Exception as e:
             self.log(f"apply_custom_text_settings error: {e}")
 
-    # -------------------------
-    # Camera control
-    # -------------------------
     def start_feed(self):
             if self.is_running:
                 return
@@ -172,7 +155,6 @@ class CameraProcessor:
                 self.cap = cv2.VideoCapture(self.camera_id)
                 if not self.cap.isOpened():
                     raise Exception(f"Could not open camera id {self.camera_id}")
-                # set resolution
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
@@ -181,17 +163,14 @@ class CameraProcessor:
                 self.frame_count = 0
                 self.sentence = ""
 
-                # clear queue
                 with self.frame_queue.mutex:
                     self.frame_queue.queue.clear()
 
-                # start worker thread
                 self.processing_thread = threading.Thread(target=self._process_loop, daemon=True)
                 self.processing_thread.start()
                 threading.Thread(target=self._tts_monitor, daemon=True).start()
 
                 self.log(f"Camera started (ID {self.camera_id})")
-                # start GUI update loop (non-blocking)
                 self._gui_update_loop()
 
             except Exception as e:
@@ -215,21 +194,20 @@ class CameraProcessor:
                 self.prediction_history = [] 
                 return
 
-            # 1. GET PREDICTION
             if isinstance(self.engine, AlphabetEngine):
                 keypoints, hand_detected = self.extract_keypoints(results)
                 if hand_detected:
                     action, confidence = self.engine.predict(keypoints)
                     is_confident = (confidence >= PREDICTION_THRESHOLD * 100)
                 else:
-                    action, confidence = "NO HAND", 0.0 # Changed from "..." for better UI feedback
+                    action, confidence = "NO HAND", 0.0
                     is_confident = False
             else:
                 action, confidence = self.engine.predict(results)
                 is_confident = (confidence >= 75) 
 
-            # 2. UPDATE STABILITY HISTORY
-            if is_confident and action not in ['NOTHING', 'Error', 'Thinking...', 'NO HAND']:
+            ignore_list = ['NOTHING', 'Error', 'Thinking...', 'NO HAND', 'NO HAND/BODY']
+            if is_confident and action not in ignore_list:
                 self.prediction_history.append(action)
             else:
                 self.prediction_history.append("...") 
@@ -237,52 +215,35 @@ class CameraProcessor:
             if len(self.prediction_history) > self.STABILITY_FRAMES:
                 self.prediction_history.pop(0)
 
-            # 3. STABILITY CHECK
             if (len(self.prediction_history) == self.STABILITY_FRAMES and 
                 len(set(self.prediction_history)) == 1 and 
                 self.prediction_history[0] != "..."):
                 
                 stable_action = self.prediction_history[0]
                 
-                # 4. COMMIT ONLY IF READY
                 if self.frame_count >= COOLDOWN_FRAMES:
                     self._commit_to_sentence(stable_action)
-                    self.frame_count = 0  # Reset Cooldown
-                    self.prediction_history = [] # Reset History so it doesn't double-trigger
+                    self.frame_count = 0 
+                    self.prediction_history = []
                     self.log(f"STABLE ACCEPTED: {stable_action}")
 
-            # IMPORTANT: Always increment frame_count so the "READY" state can be reached
             self.current_action = action
             self.current_confidence = confidence
             self.frame_count += 1
-            
-            # UI Status Text
-            if self.frame_count < COOLDOWN_FRAMES:
-                self.cooldown_status = f"WAIT ({COOLDOWN_FRAMES - self.frame_count})"
-            else:
-                self.cooldown_status = "READY"
+            self.cooldown_status = "READY" if self.frame_count >= COOLDOWN_FRAMES else f"WAIT({COOLDOWN_FRAMES-self.frame_count})"
 
     def _process_loop(self):
             while not self.stop_event.is_set():
                 try:
-                    # 1. Pull the 'package' from the queue
                     data = self.frame_queue.get(timeout=0.1)
-                    
-                    # 2. Unpack it into the frame and the mediapipe results
                     frame_rgb, results = data
-                    
-                    # 3. Send BOTH to the process function
                     self._process_frame(frame_rgb, results)
-                    
                 except Empty:
                     continue
                 except Exception as e:
                     self.log(f"Processing thread error: {e}")
                     time.sleep(0.1)
 
-    # -------------------------
-    # GUI update loop (main thread)
-    # -------------------------
     def _gui_update_loop(self):
             if not self.is_running:
                 self.canvas.itemconfig(self.sentence_text_id, text="Start Signing...")
@@ -295,7 +256,6 @@ class CameraProcessor:
                 frame = cv2.flip(frame, 1)
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # --- SKELETON DRAWING ---
                 results = self.holistic.process(frame_rgb)
                 if results.pose_landmarks:
                     mp_drawing.draw_landmarks(
@@ -308,13 +268,11 @@ class CameraProcessor:
                 if results.right_hand_landmarks:
                     mp_drawing.draw_landmarks(frame_rgb, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
 
-                # Render frame to canvas
                 img = Image.fromarray(frame_rgb)
                 img = img.resize((self.width, self.height), Image.Resampling.LANCZOS)
                 self.photo = ImageTk.PhotoImage(image=img)
                 self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
                 
-                # --- VIRTUAL CAMERA BLOCK ---
                 if self.vcam_manager and self.vcam_manager.is_active:
                     v_img = img.copy() 
                     draw = ImageDraw.Draw(v_img)
@@ -339,18 +297,14 @@ class CameraProcessor:
                     v_frame = np.fliplr(v_frame) 
                     self.vcam_manager.send_frame(v_frame)
 
-                # Enqueue for processing thread
                 try:
-                    # OPTIMIZATION: Pass the results we already calculated to save CPU!
                     self.frame_queue.put_nowait((frame_rgb.copy(), results))
                 except Exception:
                     pass
 
-                # Update prediction text
                 prediction_display = f"{self.current_action} ({self.current_confidence:.1f}%) | {self.cooldown_status}"
                 self.canvas.itemconfig(self.prediction_text_id, text=prediction_display)
 
-                # Update sentence text
                 text = self.sentence if self.sentence else "Start Signing..."
                 x, y = self.width // 2, self.text_y
                 font_spec = ('Helvetica', self.text_size, 'bold')
@@ -374,12 +328,8 @@ class CameraProcessor:
                 self.canvas.tag_raise(self.sentence_text_id)
                 self.canvas.tag_raise(self.prediction_text_id)
 
-            # THIS LINE MUST BE INDENTED 8 SPACES (ALIGNED WITH 'if ret:')
             self.canvas.after(16, self._gui_update_loop)
 
-    # -------------------------
-    # Helpers
-    # -------------------------
     def extract_keypoints(self, results):
         hand_keypoints = np.zeros(LANDMARK_DIM, dtype=np.float32)
         hand_landmarks_detected = False
@@ -394,14 +344,12 @@ class CameraProcessor:
         elif getattr(results, 'left_hand_landmarks', None):
             hand_landmarks_detected = True
             kp = np.array([[res.x, res.y, res.z] for res in results.left_hand_landmarks.landmark], dtype=np.float32)
-            # mirror left to match right
             kp[:, 0] = -kp[:, 0]
             hand_keypoints = kp.flatten()
 
         return hand_keypoints, hand_landmarks_detected
     
     def _tts_monitor(self):
-        """Background loop to check for silence."""
         while True:
             time.sleep(0.5)
             if not self.draft_text:
@@ -414,83 +362,82 @@ class CameraProcessor:
         if self.draft_text and self.tts_enabled:
             text_to_say = self.draft_text
             self.log(f"Speaking Draft{reason}: {text_to_say}")
-            # Start speech in a background thread
             threading.Thread(target=self._speak, args=(text_to_say,), daemon=True).start()
-            self.draft_text = "" # Clear draft buffer
+            self.draft_text = ""
 
     def _speak(self, text):
-        """Internal helper to handle TTS output and route to Virtual Cable."""
-        try:
-            import pyttsx3
-            import os
-            from pygame import mixer
-            import time
-
-            # 1. Initialize TTS Engine
-            engine = pyttsx3.init()
-            
-            # Sync voice type (Male/Female) from GUI variables
-            voices = engine.getProperty('voices')
-            if hasattr(self, 'voice_type') and self.voice_type == "M":
-                engine.setProperty('voice', voices[0].id)
-            else:
-                engine.setProperty('voice', voices[1].id)
-
-            # 2. Render speech to a temporary file
-            # pyttsx3.say() goes to default hardware; save_to_file allows manual routing
-            temp_wav = "tts_output.wav"
-            engine.save_to_file(text, temp_wav)
-            engine.runAndWait()
-            engine.stop()
-            del engine
-
-            # 3. Initialize Pygame Mixer on the Virtual Cable
-            virtual_device = 'CABLE Input (VB-Audio Virtual Cable)'
-            
+        """THREAD-SAFE audio handler with Lazy Imports."""
+        with self.audio_lock:
+            # --- IMPORTS MOVED HERE FOR FAST STARTUP ---
             try:
-                # Initialize mixer specifically for the virtual cable
-                mixer.init(devicename=virtual_device)
-                speech_sound = mixer.Sound(temp_wav)
-                speech_sound.play()
+                import pyttsx3
+                from pygame import mixer
                 
-                # Block thread until speaking is finished to prevent file cleanup errors
-                while mixer.get_busy():
-                    time.sleep(0.1)
-                    
-                mixer.quit()
-            except Exception as mixer_e:
-                self.log(f"Mixer Error: {mixer_e}. Falling back to default audio.")
-                mixer.init() # Fallback to default
-                mixer.Sound(temp_wav).play()
-            
-            # 4. Cleanup
-            if os.path.exists(temp_wav):
-                os.remove(temp_wav)
+                # 1. Initialize TTS Engine
+                engine = pyttsx3.init()
+                
+                voices = engine.getProperty('voices')
+                if hasattr(self, 'voice_type') and self.voice_type == "M":
+                    engine.setProperty('voice', voices[0].id)
+                else:
+                    engine.setProperty('voice', voices[1].id)
 
-        except Exception as e:
-            self.log(f"TTS Routing Error: {e}")
+                temp_wav = "tts_output.wav"
+                engine.save_to_file(text, temp_wav)
+                engine.runAndWait()
+                engine.stop()
+                del engine
+
+                # 2. Pygame Mixer Handling
+                virtual_device = 'CABLE Input (VB-Audio Virtual Cable)'
+                
+                try:
+                    # Clean up any zombie mixer state
+                    if mixer.get_init():
+                        mixer.quit()
+                    
+                    mixer.init(devicename=virtual_device)
+                    speech_sound = mixer.Sound(temp_wav)
+                    speech_sound.play()
+                    
+                    while mixer.get_busy():
+                        time.sleep(0.1)
+                        
+                    mixer.quit()
+                except Exception as mixer_e:
+                    self.log(f"Mixer Error: {mixer_e}. Falling back to default.")
+                    if mixer.get_init(): mixer.quit()
+                    mixer.init()
+                    mixer.Sound(temp_wav).play()
+                    while mixer.get_busy():
+                        time.sleep(0.1)
+                    mixer.quit()
+                
+                # 3. Cleanup
+                if os.path.exists(temp_wav):
+                    os.remove(temp_wav)
+
+            except Exception as e:
+                self.log(f"TTS Routing Error: {e}")
 
     def _commit_to_sentence(self, action):
-            """Handles adding characters/words to the string and TTS buffer."""
-            char_to_add = action
+        char_to_add = action
+        
+        if action == 'SPACE':
+            char_to_add = ' '
+        elif action == 'DELETE':
+            if self.sentence:
+                self.sentence = self.sentence[:-1]
+            if self.draft_text:
+                self.draft_text = self.draft_text[:-1]
+            char_to_add = None
+        
+        if char_to_add:
+            if isinstance(self.engine, WordEngine) and self.sentence and not self.sentence.endswith(" "):
+                self.sentence += " " + char_to_add
+                self.draft_text += " " + char_to_add
+            else:
+                self.sentence += char_to_add
+                self.draft_text += char_to_add
             
-            if action == 'SPACE':
-                char_to_add = ' '
-            elif action == 'DELETE':
-                if self.sentence:
-                    self.sentence = self.sentence[:-1]
-                if self.draft_text: # Keep TTS draft in sync with the sentence
-                    self.draft_text = self.draft_text[:-1]
-                char_to_add = None # Don't add "DELETE" as a word
-            
-            if char_to_add:
-                # Word Mode Logic
-                if isinstance(self.engine, WordEngine) and self.sentence and not self.sentence.endswith(" "):
-                    self.sentence += " " + char_to_add
-                    self.draft_text += " " + char_to_add
-                else:
-                    # Alphabet Mode Logic
-                    self.sentence += char_to_add
-                    self.draft_text += char_to_add
-                
-                self.last_sign_time = time.time()
+            self.last_sign_time = time.time()

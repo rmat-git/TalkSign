@@ -1,9 +1,8 @@
 # app/engine/words.py
 import numpy as np
 import pandas as pd
-import os
 
-# Ensure this list matches the TARGET_GLOSSES in your Word_model.ipynb exactly
+# Ensure this matches your Word_model.ipynb exactly
 WORD_CLASSES = [
     "me", "you", "we", "they", "hello", 
     "who", "what", "yes", "no", "fine", "help", "meet", "good",
@@ -17,92 +16,95 @@ class WordEngine:
         self.inference_model = inference_model
         self.sequence_buffer = []
         self.sequence_length = 30
-        self.threshold = 0.75  # Matches your test code WORD_THRESHOLD
+        self.threshold = 0.75 # Lower this to 0.5 if it's too strict
+        self.num_landmarks = 75 
 
     def extract_body_landmarks(self, results):
         """
-        Extracts Pose (99), Left Hand (63), and Right Hand (63) features.
-        Total: 225 features per frame.
+        Extracts features AND un-flips the X-coordinates to match training data.
         """
         vec = []
         
-        # 1. Pose Landmarks (33 points * 3 = 99 features)
-        if results.pose_landmarks:
-            for lm in results.pose_landmarks.landmark:
-                vec.extend([lm.x, lm.y, lm.z])
-        else:
-            vec.extend([0.0] * 99)
+        # Helper to flip X: (1.0 - x) transforms 0.8 -> 0.2
+        def get_coords(landmark_list, count):
+            temp = []
+            if landmark_list:
+                for lm in landmark_list.landmark:
+                    # --- CRITICAL FIX: UN-FLIP X COORDINATE ---
+                    # Camera is mirrored (Right is Right), but Model expects 
+                    # standard video (Right hand is on Left side).
+                    temp.extend([1.0 - lm.x, lm.y, lm.z]) 
+            else:
+                temp.extend([0.0] * (count * 3))
+            return temp
 
-        # 2. Left Hand Landmarks (21 points * 3 = 63 features)
-        if results.left_hand_landmarks:
-            for lm in results.left_hand_landmarks.landmark:
-                vec.extend([lm.x, lm.y, lm.z])
-        else:
-            vec.extend([0.0] * 63)
-
-        # 3. Right Hand Landmarks (21 points * 3 = 63 features)
-        if results.right_hand_landmarks:
-            for lm in results.right_hand_landmarks.landmark:
-                vec.extend([lm.x, lm.y, lm.z])
-        else:
-            vec.extend([0.0] * 63)
+        # 1. Pose (33 points)
+        vec.extend(get_coords(results.pose_landmarks, 33))
+            
+        # 2. Left Hand (21 points)
+        vec.extend(get_coords(results.left_hand_landmarks, 21))
+            
+        # 3. Right Hand (21 points)
+        vec.extend(get_coords(results.right_hand_landmarks, 21))
             
         return vec
 
     def pre_process_sequence(self, sequence):
         """
-        Matches training logic: Interpolation -> Normalization -> Resampling.
+        Normalization logic matching the training exactly.
         """
-        # Convert buffer to DataFrame for interpolation
-        df = pd.DataFrame(sequence).replace(0.0, np.nan).interpolate(limit_direction='both').fillna(0.0)
-        
-        # Reshape to (Frames, Landmarks, XYZ) -> (30+, 75, 3)
-        data = df.values.astype(np.float32).reshape(-1, 75, 3)
-        
-        # Shoulder-Center Normalization
-        # Based on index 11 (Left Shoulder) and 12 (Right Shoulder)
-        for i in range(data.shape[0]):
-            left_shoulder = data[i, 11]
-            right_shoulder = data[i, 12]
+        data = np.array(sequence, dtype=np.float32)
+
+        # 1. Interpolation
+        df = pd.DataFrame(data)
+        df = df.replace(0.0, np.nan)
+        df = df.interpolate(method='linear', axis=0, limit_direction='both')
+        df = df.fillna(0.0)
+        data = df.values.astype(np.float32)
+
+        # Reshape to (Frames, Landmarks, 3)
+        frames = data.reshape(-1, self.num_landmarks, 3)
+
+        # 2. Body-Centric Normalization
+        for i in range(frames.shape[0]):
+            frame = frames[i]
+            # Landmarks 11 & 12 are shoulders
+            left_shoulder = frame[11] 
+            right_shoulder = frame[12]
             
-            center = (left_shoulder + right_shoulder) / 2.0
+            shoulder_center = (left_shoulder + right_shoulder) / 2.0
             width = np.linalg.norm(left_shoulder - right_shoulder) + 1e-6
             
-            # Center the data and scale by shoulder width
-            data[i] = (data[i] - center) / (width / 2.0)
+            frame = (frame - shoulder_center) / (width / 2.0)
+            frames[i] = frame
+
+        norm_seq = frames.reshape(-1, self.num_landmarks * 3)
+
+        # 3. Time Resizing
+        target_len = self.sequence_length
+        res = np.zeros((target_len, norm_seq.shape[1]))
         
-        # Flatten back to (Frames, 225)
-        norm_seq = data.reshape(-1, 225)
-        
-        # Resample/Interpolate to exactly 30 frames (Temporal normalization)
-        resampled_data = np.zeros((30, 225))
-        for j in range(225):
-            resampled_data[:, j] = np.interp(
-                np.linspace(0, len(norm_seq) - 1, 30),
+        for j in range(norm_seq.shape[1]):
+            res[:, j] = np.interp(
+                np.linspace(0, len(norm_seq)-1, target_len),
                 np.arange(len(norm_seq)),
                 norm_seq[:, j]
             )
             
-        return np.expand_dims(resampled_data, axis=0)
+        return np.expand_dims(res, axis=0)
 
     def predict(self, results):
-        """
-        Modified to only predict if the full required body parts are visible.
-        Returns (predicted_word, confidence_percent)
-        """
-        # 1. CHECK VISIBILITY: Do we have all necessary parts?
-        # We need Pose AND at least one hand to be considered a 'valid' sign frame
+        # 1. VISIBILITY CHECK
         has_pose = results.pose_landmarks is not None
         has_hands = (results.left_hand_landmarks is not None or 
                      results.right_hand_landmarks is not None)
 
         if not has_pose or not has_hands:
-            # If body is incomplete, clear the buffer so we don't 
-            # mix old frames with new ones later
-            self.sequence_buffer = [] 
+            if len(self.sequence_buffer) > 0:
+                self.sequence_buffer = [] 
             return "NO HAND/BODY", 0.0
 
-        # 2. ADD TO BUFFER (Only if complete)
+        # 2. ADD TO BUFFER
         current_landmarks = self.extract_body_landmarks(results)
         self.sequence_buffer.append(current_landmarks)
         
@@ -113,6 +115,7 @@ class WordEngine:
         if len(self.sequence_buffer) >= self.sequence_length:
             try:
                 input_data = self.pre_process_sequence(self.sequence_buffer)
+                
                 res = self.inference_model.get_raw_prediction(input_data)
                 
                 if res is not None:
@@ -121,7 +124,12 @@ class WordEngine:
                     
                     if confidence > self.threshold:
                         word = WORD_CLASSES[idx]
+                        # Optional: Clear buffer after success to prevent double-fire
+                        # self.sequence_buffer = [] 
                         return word, confidence * 100
+                    else:
+                        return f"({WORD_CLASSES[idx]}?)", confidence * 100
+                        
             except Exception as e:
                 print(f"Word Engine Error: {e}")
                 

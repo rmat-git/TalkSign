@@ -2,9 +2,8 @@ import os
 import numpy as np
 import tensorflow as tf
 
-# --- CONFIGURATION ---
-# Note: Ensure this path is correct relative to where you run main.py
-MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'model', 'asl_alphabet_model.keras')
+# Default fallback
+DEFAULT_ALPHA_MODEL = 'asl_alphabet_model.keras'
 
 # Centralized list of supported gestures/actions
 ACTIONS = [
@@ -14,53 +13,74 @@ ACTIONS = [
 ]
 
 class InferenceModel:
-    """
-    Handles only the Loading and Execution of the Neural Network.
-    Feature extraction and geometry are now handled by the Engine layer.
-    """
     def __init__(self, log_callback=print):
         self.log = log_callback
         self.model = None
         self.is_saved_model = False
-        # The model is usually loaded explicitly by main.py, 
-        # but calling it here ensures it's ready if used standalone.
-        self.load_model()
+        
+        # Load default on startup
+        self.load_model(DEFAULT_ALPHA_MODEL)
 
-    def load_model(self, custom_path=None):
-            """Loads the model from disk or falls back to Mock mode if not found."""
-            target_path = custom_path if custom_path else MODEL_PATH
+    def _find_model_file(self, filename):
+        """
+        Searches for the model file in the correct folders.
+        """
+        # We strip any path (like "../model/") and just use the filename "word_model.keras"
+        clean_name = os.path.basename(filename)
+
+        possible_paths = [
+            # 1. Check inside "model" folder (Most likely for you)
+            os.path.join('model', clean_name),
             
-            if not os.path.exists(target_path):
-                self.log(f"Model not found at {target_path}. Using mock mode.")
-                self._set_mock_model()
-                return
+            # 2. Check current folder
+            clean_name, 
+            
+            # 3. Check specific relative path for app structure
+            os.path.join(os.path.dirname(__file__), '..', 'model', clean_name),
+            
+            # 4. Check absolute path if provided
+            filename
+        ]
 
-            try:
-                # Check if it's a folder (SavedModel) or a file (.keras/.h5)
-                if os.path.isdir(target_path):
-                    self.model = tf.saved_model.load(target_path)
-                    self.is_saved_model = True
-                else:
-                    self.model = tf.keras.models.load_model(target_path, compile=False)
-                    self.is_saved_model = False
-                
-                self.log(f"Model loaded successfully from {target_path}")
-            except Exception as e:
-                self.log(f"Load Error: {e}. Falling back to mock.")
-                self._set_mock_model()
+        for path in possible_paths:
+            if os.path.exists(path):
+                return os.path.abspath(path)
+        
+        return None
+
+    def load_model(self, model_identifier=None):
+        target_name = model_identifier if model_identifier else DEFAULT_ALPHA_MODEL
+        
+        # FIND THE FILE
+        found_path = self._find_model_file(target_name)
+        
+        if not found_path:
+            self.log(f"CRITICAL: Could not find '{target_name}' in 'model/' folder.")
+            self.log("Falling back to MOCK MODE.")
+            self._set_mock_model()
+            return
+
+        try:
+            self.log(f"Loading model from: {found_path}")
+            if os.path.isdir(found_path):
+                self.model = tf.saved_model.load(found_path)
+                self.is_saved_model = True
+            else:
+                self.model = tf.keras.models.load_model(found_path, compile=False)
+                self.is_saved_model = False
+            self.log("SUCCESS: Model loaded.")
+        except Exception as e:
+            self.log(f"Load Error: {e}")
+            self._set_mock_model()
 
     def _set_mock_model(self):
-        """Enables development without a GPU or model file present."""
         self.model = True 
-        self.log("Backend: Running in MOCK mode (Random Predictions).")
+        self.log("Backend: Running in MOCK mode.")
 
     def get_raw_prediction(self, input_array):
-        """
-        Takes a processed numpy array (shape 1, 80) and returns the softmax probabilities.
-        """
         if self.model is True:
-            res = np.random.dirichlet(np.ones(len(ACTIONS)), size=1)[0]
-            return res
+            # Random guessing
+            return np.random.dirichlet(np.ones(len(ACTIONS)), size=1)[0]
 
         try:
             if self.is_saved_model:
@@ -70,7 +90,7 @@ class InferenceModel:
             else:
                 return self.model.predict(input_array, verbose=0)[0]
         except Exception as e:
-            self.log(f"Model Execution Error: {e}")
+            self.log(f"Prediction Error: {e}")
             return None
 
 # -------------------------
