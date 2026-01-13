@@ -1,6 +1,9 @@
 import tkinter as tk
 import os
 import sys
+import tensorflow as tf
+
+tf.config.run_functions_eagerly(False)
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 

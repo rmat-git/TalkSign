@@ -6,8 +6,10 @@ import time
 import threading
 from queue import Queue, Empty
 import os
+import textwrap
 
-# NOTE: Audio imports removed from here to speed up launch time
+# --- NEW: GEMINI IMPORTS ---
+import google.generativeai as genai
 
 # skeleton
 import mediapipe as mp
@@ -19,11 +21,20 @@ from app.engine import AlphabetEngine, WordEngine
 
 mp_holistic = mp_solutions.holistic
 
+# --- CONFIGURATION ---
 SEQUENCE_LENGTH = 30
 LANDMARK_DIM = 63
-PREDICTION_THRESHOLD = 0.80
-COOLDOWN_FRAMES = 20
+ALPHABET_THRESHOLD = 85  
+WORD_THRESHOLD = 75      
+PREDICTION_COOLDOWN = 1.0  
+MISSING_HAND_TOLERANCE = 1.0  
 MAX_QUEUE_SIZE = 2
+
+# --- GEMINI API SETUP ---
+# Using the key from your script
+API_KEY = "PLACE_API_KEY_HERE"
+os.environ["GOOGLE_API_KEY"] = API_KEY
+genai.configure(api_key=API_KEY)
 
 class CameraProcessor:
     def __init__(self, canvas, inference_model, log_callback,
@@ -35,35 +46,44 @@ class CameraProcessor:
         self.height = height
         self.camera_id = camera_id
         
-        # --- AUDIO STABILITY LOCK ---
-        # Keeps the app safe from crashes, but doesn't slow down startup
         self.audio_lock = threading.Lock() 
         
+        # Initialize Gemini Model
+        try:
+            self.llm_model = genai.GenerativeModel('gemini-2.5-flash')
+            self.log("System: Gemini 2.5 Flash Connected.")
+        except Exception as e:
+            self.log(f"Gemini Error: {e}")
+            self.llm_model = None
+
         self.engine = AlphabetEngine(self.model_wrapper)
 
         self.vcam_manager = None
         self.tts_enabled = True
         self.last_spoken_sentence = ""
 
-        # Camera + thread state
         self.cap = None
         self.is_running = False
         self.processing_thread = None
         self.stop_event = threading.Event()
         self.frame_queue = Queue(maxsize=MAX_QUEUE_SIZE)
 
-        # Prediction/shared state
         self.current_action = "..."
         self.current_confidence = 0.0
         self.cooldown_status = "READY"
-        self.frame_count = 0
-        self.sentence = ""
+        self.raw_tokens = []  
         self.draft_text = ""
-        self.last_sign_time = time.time()
-        self.tts_threshold = 7 
-        self.silence_timeout = 2.0
+        self.display_text_override = None # Used to show "Translating..."
+        
+        self.force_new_token = False 
 
-        # --- Bottom sentence text settings (live) ---
+        self.last_prediction_time = 0  
+        self.last_sign_time = time.time()
+        self.hands_lost_time = None  
+        
+        self.tts_threshold = 7 
+        self.silence_timeout = 2.5
+
         self.text_enabled = True
         self.text_color = "#FFFFFF"
         self.text_size = 40
@@ -75,6 +95,24 @@ class CameraProcessor:
             10, 10,
             anchor='nw', fill='lime', font=('Helvetica', 16, 'bold'),
             text="Ready"
+        )
+
+        self.mode_status_id = self.canvas.create_text(
+            20, 40,
+            anchor='nw', fill='white', font=('Helvetica', 14, 'bold'),
+            text="MODE: SPELLING"
+        )
+
+        self.hands_status_id = self.canvas.create_text(
+            20, 70,
+            anchor='nw', fill='lime', font=('Helvetica', 14, 'bold'),
+            text="HANDS: DETECTED"
+        )
+
+        self.system_status_id = self.canvas.create_text(
+            20, 100,
+            anchor='nw', fill='lime', font=('Helvetica', 14, 'bold'),
+            text="SYSTEM: READY"
         )
 
         self.sentence_text_id = self.canvas.create_text(
@@ -107,22 +145,25 @@ class CameraProcessor:
         self.STABILITY_FRAMES = 5  
         
     def set_engine(self, engine_type):
-            """Swaps the active engine and resets all text/buffers."""
-            from app.engine import AlphabetEngine, WordEngine
-            
-            if engine_type == "alphabet":
-                self.engine = AlphabetEngine(self.model_wrapper)
-                self.log("Engine Switched: ALPHABET")
-            elif engine_type == "word":
-                self.engine = WordEngine(self.model_wrapper)
-                self.log("Engine Switched: WORDS")
-            
-            self.sentence = ""
-            self.draft_text = ""
-            self.prediction_history = []
-            self.frame_count = 0
-            self.current_action = "..."
-            self.current_confidence = 0.0
+        """Swaps the active engine and resets all text/buffers."""
+        from app.engine import AlphabetEngine, WordEngine
+        
+        if engine_type == "alphabet":
+            self.engine = AlphabetEngine(self.model_wrapper)
+            self.log("Engine Switched: ALPHABET")
+        elif engine_type == "word":
+            self.engine = WordEngine(self.model_wrapper)
+            self.log("Engine Switched: WORDS")
+        
+        # Reset mechanical buffers
+        self.prediction_history = []
+        self.current_action = "..."
+        self.current_confidence = 0.0
+        self.last_prediction_time = 0
+        self.hands_lost_time = None
+        
+        # Force a new token (space) when switching modes
+        self.force_new_token = True
 
     def apply_custom_text_settings(self, enabled, color, size, y, effect):
         try:
@@ -149,186 +190,249 @@ class CameraProcessor:
             self.log(f"apply_custom_text_settings error: {e}")
 
     def start_feed(self):
-            if self.is_running:
-                return
-            try:
-                self.cap = cv2.VideoCapture(self.camera_id)
-                if not self.cap.isOpened():
-                    raise Exception(f"Could not open camera id {self.camera_id}")
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        if self.is_running:
+            return
+        try:
+            self.cap = cv2.VideoCapture(self.camera_id)
+            if not self.cap.isOpened():
+                raise Exception(f"Could not open camera id {self.camera_id}")
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-                self.is_running = True
-                self.stop_event.clear()
-                self.frame_count = 0
-                self.sentence = ""
+            self.is_running = True
+            self.stop_event.clear()
+            self.raw_tokens = []
+            self.last_prediction_time = 0
+            self.hands_lost_time = None
+            self.force_new_token = False
+            self.display_text_override = None
 
-                with self.frame_queue.mutex:
-                    self.frame_queue.queue.clear()
+            with self.frame_queue.mutex:
+                self.frame_queue.queue.clear()
 
-                self.processing_thread = threading.Thread(target=self._process_loop, daemon=True)
-                self.processing_thread.start()
-                threading.Thread(target=self._tts_monitor, daemon=True).start()
+            self.processing_thread = threading.Thread(target=self._process_loop, daemon=True)
+            self.processing_thread.start()
+            threading.Thread(target=self._tts_monitor, daemon=True).start()
 
-                self.log(f"Camera started (ID {self.camera_id})")
-                self._gui_update_loop()
+            self.log(f"Camera started (ID {self.camera_id})")
+            self._gui_update_loop()
 
-            except Exception as e:
-                self.log(f"Camera start error: {e}")
-                self.stop_feed()
+        except Exception as e:
+            self.log(f"Camera start error: {e}")
+            self.stop_feed()
 
     def stop_feed(self):
-            if not self.is_running:
-                return
-            self.is_running = False
-            self.stop_event.set()
-            if self.processing_thread and self.processing_thread.is_alive():
-                self.processing_thread.join(timeout=1.0)
-            if self.cap:
-                self.cap.release()
-                self.cap = None
-            self.log("Camera stopped.")
+        if not self.is_running:
+            return
+        self.is_running = False
+        self.stop_event.set()
+        if self.processing_thread and self.processing_thread.is_alive():
+            self.processing_thread.join(timeout=1.0)
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+        self.log("Camera stopped.")
 
     def _process_frame(self, frame_rgb, results):
-            if results is None:
-                self.prediction_history = [] 
-                return
+        time_since_last = time.time() - self.last_prediction_time
+        is_cooldown = time_since_last < PREDICTION_COOLDOWN
+        
+        if is_cooldown:
+            remaining = PREDICTION_COOLDOWN - time_since_last
+            self.cooldown_status = f"COOLDOWN ({remaining:.1f}s)"
+        else:
+            self.cooldown_status = "READY"
 
-            if isinstance(self.engine, AlphabetEngine):
-                keypoints, hand_detected = self.extract_keypoints(results)
-                if hand_detected:
-                    action, confidence = self.engine.predict(keypoints)
-                    is_confident = (confidence >= PREDICTION_THRESHOLD * 100)
-                else:
-                    action, confidence = "NO HAND", 0.0
-                    is_confident = False
-            else:
-                action, confidence = self.engine.predict(results)
-                is_confident = (confidence >= 75) 
-
-            ignore_list = ['NOTHING', 'Error', 'Thinking...', 'NO HAND', 'NO HAND/BODY']
-            if is_confident and action not in ignore_list:
-                self.prediction_history.append(action)
-            else:
-                self.prediction_history.append("...") 
-
-            if len(self.prediction_history) > self.STABILITY_FRAMES:
-                self.prediction_history.pop(0)
-
-            if (len(self.prediction_history) == self.STABILITY_FRAMES and 
-                len(set(self.prediction_history)) == 1 and 
-                self.prediction_history[0] != "..."):
-                
-                stable_action = self.prediction_history[0]
-                
-                if self.frame_count >= COOLDOWN_FRAMES:
-                    self._commit_to_sentence(stable_action)
-                    self.frame_count = 0 
+        if isinstance(self.engine, AlphabetEngine):
+            hands_visible = (results and (results.right_hand_landmarks or results.left_hand_landmarks))
+        else:  
+            hands_visible = (results and (results.left_hand_landmarks or results.right_hand_landmarks))
+        
+        if not hands_visible:
+            if self.hands_lost_time is None:
+                self.hands_lost_time = time.time()
+            
+            if time.time() - self.hands_lost_time > MISSING_HAND_TOLERANCE:
+                if self.prediction_history:
                     self.prediction_history = []
-                    self.log(f"STABLE ACCEPTED: {stable_action}")
+                    self.log("Buffers cleared (hands absent > 1.0s)")
+                
+                if hasattr(self.engine, 'sequence_buffer'):
+                    self.engine.sequence_buffer = []
+            return 
+        else:
+            self.hands_lost_time = None
+        
+        if is_cooldown:
+            return
+        
+        if isinstance(self.engine, AlphabetEngine):
+            keypoints, hand_detected = self.extract_keypoints(results)
+            if hand_detected:
+                action, confidence = self.engine.predict(keypoints)
+                is_confident = (confidence >= ALPHABET_THRESHOLD)
+            else:
+                action, confidence = "NO HAND", 0.0
+                is_confident = False
+        else:
+            action, confidence = self.engine.predict(results)
+            is_confident = (confidence >= WORD_THRESHOLD)
 
-            self.current_action = action
-            self.current_confidence = confidence
-            self.frame_count += 1
-            self.cooldown_status = "READY" if self.frame_count >= COOLDOWN_FRAMES else f"WAIT({COOLDOWN_FRAMES-self.frame_count})"
+        ignore_list = ['NOTHING', 'Error', 'Thinking...', 'NO HAND', 'NO HAND/BODY', '...']
+        if is_confident and action not in ignore_list:
+            self.prediction_history.append(action)
+        else:
+            self.prediction_history.append(None)
+
+        if len(self.prediction_history) > self.STABILITY_FRAMES:
+            self.prediction_history.pop(0)
+
+        if (len(self.prediction_history) == self.STABILITY_FRAMES and 
+            all(p == self.prediction_history[0] for p in self.prediction_history) and 
+            self.prediction_history[0] is not None and
+            self.prediction_history[0] not in ignore_list):
+            
+            stable_action = self.prediction_history[0]
+            self._commit_to_sentence(stable_action)
+            self.last_prediction_time = time.time()
+            self.log(f"STABLE ACCEPTED: {stable_action}")
+            
+            self.prediction_history = []
+            if hasattr(self.engine, 'sequence_buffer'):
+                self.engine.sequence_buffer = []
+
+        self.current_action = action if action else "..."
+        self.current_confidence = confidence
 
     def _process_loop(self):
-            while not self.stop_event.is_set():
-                try:
-                    data = self.frame_queue.get(timeout=0.1)
-                    frame_rgb, results = data
-                    self._process_frame(frame_rgb, results)
-                except Empty:
-                    continue
-                except Exception as e:
-                    self.log(f"Processing thread error: {e}")
-                    time.sleep(0.1)
+        while not self.stop_event.is_set():
+            try:
+                data = self.frame_queue.get(timeout=0.1)
+                frame_rgb, results = data
+                self._process_frame(frame_rgb, results)
+            except Empty:
+                continue
+            except Exception as e:
+                self.log(f"Processing thread error: {e}")
+                time.sleep(0.1)
 
     def _gui_update_loop(self):
-            if not self.is_running:
-                self.canvas.itemconfig(self.sentence_text_id, text="Start Signing...")
-                self.canvas.itemconfig(self.prediction_text_id, text="Camera Stopped")
-                return
+        mode_text = "MODE: SPELLING" if isinstance(self.engine, AlphabetEngine) else "MODE: SIGNING"
+        self.canvas.itemconfig(self.mode_status_id, text=mode_text)
+
+        if self.cooldown_status.startswith("COOLDOWN"):
+            self.canvas.itemconfig(self.system_status_id, text=f"SYSTEM: {self.cooldown_status}", fill='orange')
+        else:
+            self.canvas.itemconfig(self.system_status_id, text="SYSTEM: READY", fill='lime')
+
+        if not self.is_running:
+            self.canvas.itemconfig(self.sentence_text_id, text="Start Signing...")
+            self.canvas.itemconfig(self.prediction_text_id, text="Camera Stopped")
+            return
+        
+        results = None
+        ret, frame = self.cap.read()
+        if ret:
+            frame = cv2.flip(frame, 1)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            results = self.holistic.process(frame_rgb)
             
-            results = None
-            ret, frame = self.cap.read()
-            if ret:
-                frame = cv2.flip(frame, 1)
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            hands_visible = (results and (results.left_hand_landmarks or results.right_hand_landmarks))
+            if hands_visible:
+                self.canvas.itemconfig(self.hands_status_id, text="HANDS: DETECTED", fill='lime')
+            else:
+                self.canvas.itemconfig(self.hands_status_id, text="HANDS: NOT FOUND", fill='red')
 
-                results = self.holistic.process(frame_rgb)
-                if results.pose_landmarks:
-                    mp_drawing.draw_landmarks(
-                        frame_rgb, results.pose_landmarks, mp_holistic.POSE_CONNECTIONS,
-                        mp_drawing.DrawingSpec(color=(80, 110, 10), thickness=2, circle_radius=4),
-                        mp_drawing.DrawingSpec(color=(80, 256, 121), thickness=2, circle_radius=2)
-                    )
-                if results.left_hand_landmarks:
-                    mp_drawing.draw_landmarks(frame_rgb, results.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
-                if results.right_hand_landmarks:
-                    mp_drawing.draw_landmarks(frame_rgb, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
+            if results.pose_landmarks:
+                mp_drawing.draw_landmarks(frame_rgb, results.pose_landmarks, mp_holistic.POSE_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(80, 110, 10), thickness=2, circle_radius=4),
+                    mp_drawing.DrawingSpec(color=(80, 256, 121), thickness=2, circle_radius=2))
+            if results.left_hand_landmarks:
+                mp_drawing.draw_landmarks(frame_rgb, results.left_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
+            if results.right_hand_landmarks:
+                mp_drawing.draw_landmarks(frame_rgb, results.right_hand_landmarks, mp_holistic.HAND_CONNECTIONS)
 
-                img = Image.fromarray(frame_rgb)
-                img = img.resize((self.width, self.height), Image.Resampling.LANCZOS)
-                self.photo = ImageTk.PhotoImage(image=img)
-                self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
-                
-                if self.vcam_manager and self.vcam_manager.is_active:
-                    v_img = img.copy() 
-                    draw = ImageDraw.Draw(v_img)
-                    if self.text_enabled:
-                        txt = self.sentence if self.sentence else "Start Signing..."
-                        pos = (self.width // 2, self.text_y)
-                        if not hasattr(self, '_cached_font') or self._cached_font_size != self.text_size:
-                            try:
-                                self._cached_font = ImageFont.truetype("arial.ttf", self.text_size)
-                            except:
-                                self._cached_font = ImageFont.load_default()
-                            self._cached_font_size = self.text_size
-                        
-                        if self.text_effect == "shadow":
-                            draw.text((pos[0] + 3, pos[1] + 3), txt, fill="black", font=self._cached_font, anchor="ms")
-                        elif self.text_effect == "outline":
-                            for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
-                                draw.text((pos[0] + dx, pos[1] + dy), txt, fill="black", font=self._cached_font, anchor="ms")
-                        draw.text(pos, txt, fill=self.text_color, font=self._cached_font, anchor="ms")
-                    
-                    v_frame = np.array(v_img)
-                    v_frame = np.fliplr(v_frame) 
-                    self.vcam_manager.send_frame(v_frame)
+            img = Image.fromarray(frame_rgb)
+            img = img.resize((self.width, self.height), Image.Resampling.LANCZOS)
+            self.photo = ImageTk.PhotoImage(image=img)
+            self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
+            
+            # --- DISPLAY TEXT LOGIC (With Overrides) ---
+            if self.display_text_override:
+                # 1. Show "Translating..." or Gemini Result
+                final_text = self.display_text_override
+                color_to_use = "#00FF00" # Green for special status
+            elif self.raw_tokens:
+                # 2. Show Raw Tokens
+                final_text = " ".join(self.raw_tokens)
+                color_to_use = self.text_color
+            else:
+                # 3. Default Prompt
+                final_text = "Start Signing..."
+                color_to_use = self.text_color
+            
+            # Wrap Text
+            chars_per_line = int(self.width / (self.text_size * 0.6))
+            display_text = textwrap.fill(final_text, width=max(10, chars_per_line))
 
-                try:
-                    self.frame_queue.put_nowait((frame_rgb.copy(), results))
-                except Exception:
-                    pass
-
-                prediction_display = f"{self.current_action} ({self.current_confidence:.1f}%) | {self.cooldown_status}"
-                self.canvas.itemconfig(self.prediction_text_id, text=prediction_display)
-
-                text = self.sentence if self.sentence else "Start Signing..."
-                x, y = self.width // 2, self.text_y
-                font_spec = ('Helvetica', self.text_size, 'bold')
-
+            if self.vcam_manager and self.vcam_manager.is_active:
+                v_img = img.copy() 
+                draw = ImageDraw.Draw(v_img)
                 if self.text_enabled:
-                    self.canvas.itemconfig(self.sentence_text_id, text=text, fill=self.text_color, font=font_spec)
-                    self.canvas.coords(self.sentence_text_id, x, y)
+                    pos = (self.width // 2, self.text_y)
+                    if not hasattr(self, '_cached_font') or self._cached_font_size != self.text_size:
+                        try:
+                            self._cached_font = ImageFont.truetype("arial.ttf", self.text_size)
+                        except:
+                            self._cached_font = ImageFont.load_default()
+                        self._cached_font_size = self.text_size
                     
                     if self.text_effect == "shadow":
-                        self.canvas.itemconfig(self._shadow_item, text=text, fill='black', font=font_spec)
-                        self.canvas.coords(self._shadow_item, x + 3, y + 3)
-                        self.canvas.tag_lower(self._shadow_item, self.sentence_text_id)
+                        draw.text((pos[0] + 3, pos[1] + 3), display_text, fill="black", font=self._cached_font, anchor="ms")
                     elif self.text_effect == "outline":
-                        for oid, (dx, dy) in zip(self._outline_items, [(-2, 0), (2, 0), (0, -2), (0, 2)]):
-                            self.canvas.itemconfig(oid, text=text, fill='black', font=font_spec)
-                            self.canvas.coords(oid, x + dx, y + dy)
-                            self.canvas.tag_lower(oid, self.sentence_text_id)
-                else:
-                    self.canvas.itemconfig(self.sentence_text_id, text="")
+                        for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
+                            draw.text((pos[0] + dx, pos[1] + dy), display_text, fill="black", font=self._cached_font, anchor="ms")
+                    draw.text(pos, display_text, fill=color_to_use, font=self._cached_font, anchor="ms")
+                
+                v_frame = np.array(v_img)
+                v_frame = np.fliplr(v_frame) 
+                self.vcam_manager.send_frame(v_frame)
 
-                self.canvas.tag_raise(self.sentence_text_id)
-                self.canvas.tag_raise(self.prediction_text_id)
+            try:
+                self.frame_queue.put_nowait((frame_rgb.copy(), results))
+            except Exception:
+                pass
 
-            self.canvas.after(16, self._gui_update_loop)
+            prediction_display = f"{self.current_action} ({self.current_confidence:.1f}%) | {self.cooldown_status}"
+            self.canvas.itemconfig(self.prediction_text_id, text=prediction_display)
+
+            x, y = self.width // 2, self.text_y
+            font_spec = ('Helvetica', self.text_size, 'bold')
+
+            if self.text_enabled:
+                self.canvas.itemconfig(self.sentence_text_id, text=display_text, fill=color_to_use, font=font_spec)
+                self.canvas.coords(self.sentence_text_id, x, y)
+                
+                if self.text_effect == "shadow":
+                    self.canvas.itemconfig(self._shadow_item, text=display_text, fill='black', font=font_spec)
+                    self.canvas.coords(self._shadow_item, x + 3, y + 3)
+                    self.canvas.tag_lower(self._shadow_item, self.sentence_text_id)
+                elif self.text_effect == "outline":
+                    for oid, (dx, dy) in zip(self._outline_items, [(-2, 0), (2, 0), (0, -2), (0, 2)]):
+                        self.canvas.itemconfig(oid, text=display_text, fill='black', font=font_spec)
+                        self.canvas.coords(oid, x + dx, y + dy)
+                        self.canvas.tag_lower(oid, self.sentence_text_id)
+            else:
+                self.canvas.itemconfig(self.sentence_text_id, text="")
+
+            self.canvas.tag_raise(self.sentence_text_id)
+            self.canvas.tag_raise(self.prediction_text_id)
+            self.canvas.tag_raise(self.mode_status_id)
+            self.canvas.tag_raise(self.hands_status_id)
+            self.canvas.tag_raise(self.system_status_id)
+
+        self.canvas.after(16, self._gui_update_loop)
 
     def extract_keypoints(self, results):
         hand_keypoints = np.zeros(LANDMARK_DIM, dtype=np.float32)
@@ -351,30 +455,66 @@ class CameraProcessor:
     
     def _tts_monitor(self):
         while True:
-            time.sleep(0.5)
+            time.sleep(0.1)
+            
             if not self.draft_text:
                 continue
             
-            if (time.time() - self.last_sign_time) >= self.silence_timeout:
-                self._trigger_draft_speech(" (Silence Timeout)")
+            if self.hands_lost_time is not None:
+                duration_hands_gone = time.time() - self.hands_lost_time
+                if duration_hands_gone >= 2.0:
+                    # --- TRIGGER SMART PIPELINE ---
+                    self._trigger_gemini_pipeline(" (Hands Gone > 2.0s)")
 
-    def _trigger_draft_speech(self, reason=""):
+    def _trigger_gemini_pipeline(self, reason=""):
+        """Orchestrates Gemini Correction -> UI Update -> TTS -> Reset"""
         if self.draft_text and self.tts_enabled:
-            text_to_say = self.draft_text
-            self.log(f"Speaking Draft{reason}: {text_to_say}")
-            threading.Thread(target=self._speak, args=(text_to_say,), daemon=True).start()
-            self.draft_text = ""
+            # We spawn a dedicated thread for the whole sequence so it doesn't block camera
+            threading.Thread(target=self._process_llm_and_speak, args=(self.draft_text,), daemon=True).start()
+            self.draft_text = "" # Prevent double trigger
+
+    def _process_llm_and_speak(self, raw_text):
+        """
+        1. Ask Gemini to fix grammar
+        2. Show fixed text on screen
+        3. Speak fixed text
+        4. Clear screen
+        """
+        final_text = raw_text
+        
+        # 1. CALL GEMINI (If available)
+        if self.llm_model:
+            self.display_text_override = "Gemini: Translating..."
+            self.log(f"Gemini: Refining '{raw_text}'...")
+            try:
+                prompt = f"Translate ASL Gloss to English: \"{raw_text}\". Output ONLY the sentence."
+                response = self.llm_model.generate_content(prompt)
+                
+                if response.text:
+                    final_text = response.text.strip()
+                    self.log(f"Gemini Result: {final_text}")
+            except Exception as e:
+                self.log(f"Gemini Failed: {e}. Using raw text.")
+        
+        # 2. UPDATE UI
+        self.display_text_override = final_text
+        
+        # 3. SPEAK (Thread-safe)
+        self._speak(final_text)
+        
+        # 4. RESET
+        self.display_text_override = None
+        self.raw_tokens = []
+        self.log("✓ Sequence Complete. Screen Cleared.")
 
     def _speak(self, text):
-        """THREAD-SAFE audio handler with Lazy Imports."""
         with self.audio_lock:
-            # --- IMPORTS MOVED HERE FOR FAST STARTUP ---
             try:
                 import pyttsx3
                 from pygame import mixer
                 
-                # 1. Initialize TTS Engine
                 engine = pyttsx3.init()
+                engine.setProperty('rate', 145) 
                 
                 voices = engine.getProperty('voices')
                 if hasattr(self, 'voice_type') and self.voice_type == "M":
@@ -388,32 +528,22 @@ class CameraProcessor:
                 engine.stop()
                 del engine
 
-                # 2. Pygame Mixer Handling
                 virtual_device = 'CABLE Input (VB-Audio Virtual Cable)'
                 
                 try:
-                    # Clean up any zombie mixer state
-                    if mixer.get_init():
-                        mixer.quit()
-                    
+                    if mixer.get_init(): mixer.quit()
                     mixer.init(devicename=virtual_device)
-                    speech_sound = mixer.Sound(temp_wav)
-                    speech_sound.play()
-                    
-                    while mixer.get_busy():
-                        time.sleep(0.1)
-                        
+                    mixer.Sound(temp_wav).play()
+                    while mixer.get_busy(): time.sleep(0.1)
                     mixer.quit()
                 except Exception as mixer_e:
                     self.log(f"Mixer Error: {mixer_e}. Falling back to default.")
                     if mixer.get_init(): mixer.quit()
                     mixer.init()
                     mixer.Sound(temp_wav).play()
-                    while mixer.get_busy():
-                        time.sleep(0.1)
+                    while mixer.get_busy(): time.sleep(0.1)
                     mixer.quit()
                 
-                # 3. Cleanup
                 if os.path.exists(temp_wav):
                     os.remove(temp_wav)
 
@@ -426,18 +556,35 @@ class CameraProcessor:
         if action == 'SPACE':
             char_to_add = ' '
         elif action == 'DELETE':
-            if self.sentence:
-                self.sentence = self.sentence[:-1]
-            if self.draft_text:
-                self.draft_text = self.draft_text[:-1]
+            if isinstance(self.engine, AlphabetEngine):
+                if self.raw_tokens:
+                    last_token = self.raw_tokens[-1]
+                    if len(last_token) > 0:
+                        self.raw_tokens[-1] = last_token[:-1]
+                        self.log(f"Deleted char. New token: '{self.raw_tokens[-1]}'")
+                        if len(self.raw_tokens[-1]) == 0:
+                            self.raw_tokens.pop()
+            else:
+                if self.raw_tokens:
+                    deleted = self.raw_tokens.pop()
+                    self.log(f"Deleted word: {deleted}")
+            
+            self.draft_text = " ".join(self.raw_tokens)
             char_to_add = None
         
         if char_to_add:
-            if isinstance(self.engine, WordEngine) and self.sentence and not self.sentence.endswith(" "):
-                self.sentence += " " + char_to_add
-                self.draft_text += " " + char_to_add
+            if isinstance(self.engine, AlphabetEngine):
+                if self.force_new_token or not self.raw_tokens:
+                    self.raw_tokens.append(char_to_add)
+                    self.force_new_token = False
+                else:
+                    self.raw_tokens[-1] += char_to_add
             else:
-                self.sentence += char_to_add
-                self.draft_text += char_to_add
-            
+                if not self.raw_tokens or self.raw_tokens[-1] != char_to_add:
+                    self.raw_tokens.append(char_to_add)
+                    self.force_new_token = False
+                else:
+                    self.log(f"Duplicate word '{char_to_add}' ignored")
+
+            self.draft_text = " ".join(self.raw_tokens)
             self.last_sign_time = time.time()

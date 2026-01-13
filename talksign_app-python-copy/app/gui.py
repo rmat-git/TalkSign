@@ -4,7 +4,7 @@ from app.camera import CameraProcessor
 from app.virtual_cam import VirtualCamManager
 import time
 import cv2
-import os  # Added OS for path handling
+import os
 
 # --- DEFAULT SETTINGS ---
 DEFAULT_TEXT_COLOR = "#FFFFFF"
@@ -69,10 +69,27 @@ class AppGUI:
         master.after(100, self._start_initial_camera)
         self.update_log("GUI initialized. Starting camera...")
 
-        # --- INSERT THESE KEYBOARD BINDINGS ---
+        # --- KEYBOARD BINDINGS ---
         self.master.bind("<Escape>", self._keyboard_clear_sentence)
         self.master.bind("<BackSpace>", self._keyboard_backspace)
-        # --------------------------------------
+        self.master.bind("<space>", self._keyboard_toggle_mode)  # NEW
+        self.master.bind("c", self._keyboard_clear_sentence)     # NEW (alternative to ESC)
+        self.master.bind("C", self._keyboard_clear_sentence)     # NEW (alternative to ESC)
+
+    def _keyboard_toggle_mode(self, event=None):
+        """Toggle between modes via spacebar with debounce."""
+        if hasattr(self, 'camera_processor'):
+            # Debounce: Check if 0.5s has passed since last toggle
+            current_time = time.time()
+            if hasattr(self, '_last_mode_toggle_time'):
+                if current_time - self._last_mode_toggle_time < 0.5:
+                    return  # Ignore rapid presses
+            
+            self._last_mode_toggle_time = current_time
+            
+            # Toggle the mode
+            self.toggle_prediction_mode()
+            self.update_log("Mode toggled via SPACEBAR")
 
     # ----------------------------------------------------------
     # LEFT COLUMN
@@ -96,6 +113,9 @@ class AppGUI:
         controls = tk.Frame(left, bg="#e0e0e0")
         controls.pack(fill=tk.X)
         self._create_camera_controls(controls)
+        
+        # --- NEW: SENTENCE CONTROL BUTTONS ---
+        self._create_sentence_controls(left)
 
 
     def _create_camera_controls(self, parent):
@@ -112,21 +132,21 @@ class AppGUI:
         menu.config(width=20)
         menu.pack(side=tk.LEFT, padx=10)
         
-        # --- NEW TOGGLE BUTTON ---
-        self.mode_var = tk.StringVar(value="Alphabet")
+        # --- MODE TOGGLE BUTTON ---
+        self.mode_var = tk.StringVar(value="SPELLING")
         self.mode_btn = tk.Button(
             parent,
             textvariable=self.mode_var,
             command=self.toggle_prediction_mode,
             width=12,
-            bg="#9b59b6", # Purple for Alphabet
+            bg="#9b59b6",  # Purple for Alphabet
             fg="white",
             font=('Helvetica', 10, 'bold'),
             cursor="hand2"
         )
         self.mode_btn.pack(side=tk.LEFT, padx=5)
 
-        # --- NEW START BUTTON (FAR RIGHT) ---
+        # --- START VIRTUAL CAMERA BUTTON ---
         self.start_virtual_btn = tk.Button(
             parent,
             text="START",
@@ -138,31 +158,85 @@ class AppGUI:
         )
         self.start_virtual_btn.pack(side=tk.RIGHT, padx=5)
 
-    def toggle_prediction_mode(self):
-            """Swaps between Alphabet and Word recognition modes."""
-            
-            # JUST USE FILENAMES - NO PATHS
-            # The new inference.py will automatically look inside the 'model' folder
-            ALPHA_FILE = 'asl_alphabet_model.keras'
-            WORD_FILE = 'word_model.keras'
+    def _create_sentence_controls(self, parent):
+        """New control panel for sentence management."""
+        control_frame = tk.LabelFrame(
+            parent,
+            text="📝 Sentence Controls",
+            bg="#e0e0e0",
+            padx=10,
+            pady=10,
+            font=('Helvetica', 10, 'bold')
+        )
+        control_frame.pack(fill=tk.X, pady=10)
 
-            if self.mode_var.get() == "Alphabet":
-                self.update_log("Switching to WORD mode...")
-                self.mode_var.set("Words")
-                self.mode_btn.config(bg="#2ecc71") 
-                
-                # Load Word Model
-                self.camera_processor.model_wrapper.load_model(WORD_FILE)
-                self.camera_processor.set_engine("word")
-                
-            else:
-                self.update_log("Switching to ALPHABET mode...")
-                self.mode_var.set("Alphabet")
-                self.mode_btn.config(bg="#9b59b6") 
-                
-                # Load Alphabet Model
-                self.camera_processor.model_wrapper.load_model(ALPHA_FILE)
-                self.camera_processor.set_engine("alphabet")
+        # Button row
+        btn_frame = tk.Frame(control_frame, bg="#e0e0e0")
+        btn_frame.pack(fill=tk.X)
+
+        # Clear All Button
+        clear_btn = tk.Button(
+            btn_frame,
+            text="🗑️ Clear All (ESC)",
+            command=self._keyboard_clear_sentence,
+            bg="#f44336",
+            fg="white",
+            font=('Helvetica', 9, 'bold'),
+            cursor="hand2",
+            padx=10,
+            pady=5
+        )
+        clear_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+
+        # Delete Last Button
+        delete_btn = tk.Button(
+            btn_frame,
+            text="⌫ Delete Last (Backspace)",
+            command=self._keyboard_backspace,
+            bg="#ff9800",
+            fg="white",
+            font=('Helvetica', 9, 'bold'),
+            cursor="hand2",
+            padx=10,
+            pady=5
+        )
+        delete_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
+
+        # Info label
+        info_label = tk.Label(
+            control_frame,
+            text="Tip: Use keyboard shortcuts for quick access",
+            bg="#e0e0e0",
+            fg="#666",
+            font=('Helvetica', 8, 'italic')
+        )
+        info_label.pack(pady=(5, 0))
+
+    def toggle_prediction_mode(self):
+        """Swaps between Alphabet and Word recognition modes."""
+        
+        # JUST USE FILENAMES - NO PATHS
+        # The inference.py will automatically look inside the 'model' folder
+        ALPHA_FILE = 'asl_alphabet_model.keras'
+        WORD_FILE = 'robust_word_model.keras'  # FIXED: Changed from 'word_model.keras'
+
+        if self.mode_var.get() == "SPELLING":
+            self.update_log("Switching to SIGNING mode...")
+            self.mode_var.set("SIGNING")
+            self.mode_btn.config(bg="#2ecc71")  # Green for Words
+            
+            # Load Word Model
+            self.camera_processor.model_wrapper.load_model(WORD_FILE)
+            self.camera_processor.set_engine("word")
+            
+        else:
+            self.update_log("Switching to SPELLING mode...")
+            self.mode_var.set("SPELLING")
+            self.mode_btn.config(bg="#9b59b6")  # Purple for Alphabet
+            
+            # Load Alphabet Model
+            self.camera_processor.model_wrapper.load_model(ALPHA_FILE)
+            self.camera_processor.set_engine("alphabet")
 
 
     def _handle_virtual_start(self):
@@ -220,7 +294,7 @@ class AppGUI:
 
         tk.Label(
             pos_frame,
-            text="Position (Bottom ↔ Top):",
+            text="Position (Bottom ↑ Top):",
             bg="#e0e0e0",
             width=20
         ).pack(side=tk.LEFT)
@@ -413,17 +487,28 @@ class AppGUI:
             print(msg)
     
     # ----------------------------------------------------------
-    # KEYBOARD SHORTCUTS
+    # KEYBOARD SHORTCUTS & SENTENCE MANAGEMENT
     # ----------------------------------------------------------
     def _keyboard_clear_sentence(self, event=None):
         """Clears the entire sentence and logs the action."""
         if hasattr(self, "camera_processor"):
-            self.camera_processor.sentence = ""
-            self.update_log("Sentence CLEARED via Keyboard (ESC)")
+            self.camera_processor.raw_tokens = []  # Clear token list
+            self.camera_processor.draft_text = ""  # Clear draft for TTS
+            self.update_log("✓ Sentence CLEARED (All tokens removed)")
 
     def _keyboard_backspace(self, event=None):
-        """Deletes the last character from the sentence."""
+        """Deletes the last token (word or letter) from the sentence."""
         if hasattr(self, "camera_processor"):
-            if self.camera_processor.sentence:
-                self.camera_processor.sentence = self.camera_processor.sentence[:-1]
-                self.update_log("Last character DELETED via Keyboard (Backspace)")
+            if self.camera_processor.raw_tokens:
+                deleted = self.camera_processor.raw_tokens.pop()
+                
+                # Also update draft_text for TTS
+                if self.camera_processor.draft_text:
+                    words = self.camera_processor.draft_text.split()
+                    if words:
+                        words.pop()
+                        self.camera_processor.draft_text = " ".join(words)
+                
+                self.update_log(f"✓ Deleted last token: '{deleted}'")
+            else:
+                self.update_log("⚠ Nothing to delete (sentence is empty)")
