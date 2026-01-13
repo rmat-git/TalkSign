@@ -22,7 +22,7 @@ class AppGUI:
 
         master.title("TalkSign – Customization")
         master.configure(bg="#f0f0f0")
-
+        master.geometry("1100x550")
         # --- GUI VARIABLES ---
         self.text_enabled_var = tk.BooleanVar(value=True)
         self.text_color_var = tk.StringVar(value=DEFAULT_TEXT_COLOR)

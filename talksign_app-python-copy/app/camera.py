@@ -8,8 +8,8 @@ from queue import Queue, Empty
 import os
 import textwrap
 
-# --- NEW: GEMINI IMPORTS ---
-import google.generativeai as genai
+# --- NEW: IMPORT CUSTOM LLM HANDLER ---
+from app.llm import GeminiHandler
 
 # skeleton
 import mediapipe as mp
@@ -30,11 +30,8 @@ PREDICTION_COOLDOWN = 1.0
 MISSING_HAND_TOLERANCE = 1.0  
 MAX_QUEUE_SIZE = 2
 
-# --- GEMINI API SETUP ---
-# Using the key from your script
-API_KEY = "PLACE_API_KEY_HERE"
-os.environ["GOOGLE_API_KEY"] = API_KEY
-genai.configure(api_key=API_KEY)
+# API Key (Passed to the handler)
+GEMINI_API_KEY = "PLACE_APPI_KEY_HERE"
 
 class CameraProcessor:
     def __init__(self, canvas, inference_model, log_callback,
@@ -48,13 +45,9 @@ class CameraProcessor:
         
         self.audio_lock = threading.Lock() 
         
-        # Initialize Gemini Model
-        try:
-            self.llm_model = genai.GenerativeModel('gemini-2.5-flash')
-            self.log("System: Gemini 2.5 Flash Connected.")
-        except Exception as e:
-            self.log(f"Gemini Error: {e}")
-            self.llm_model = None
+        # --- INITIALIZE GEMINI HANDLER ---
+        # This now happens in the background via llm.py
+        self.llm_handler = GeminiHandler(GEMINI_API_KEY, self.log)
 
         self.engine = AlphabetEngine(self.model_wrapper)
 
@@ -73,7 +66,7 @@ class CameraProcessor:
         self.cooldown_status = "READY"
         self.raw_tokens = []  
         self.draft_text = ""
-        self.display_text_override = None # Used to show "Translating..."
+        self.display_text_override = None 
         
         self.force_new_token = False 
 
@@ -155,14 +148,11 @@ class CameraProcessor:
             self.engine = WordEngine(self.model_wrapper)
             self.log("Engine Switched: WORDS")
         
-        # Reset mechanical buffers
         self.prediction_history = []
         self.current_action = "..."
         self.current_confidence = 0.0
         self.last_prediction_time = 0
         self.hands_lost_time = None
-        
-        # Force a new token (space) when switching modes
         self.force_new_token = True
 
     def apply_custom_text_settings(self, enabled, color, size, y, effect):
@@ -196,8 +186,10 @@ class CameraProcessor:
             self.cap = cv2.VideoCapture(self.camera_id)
             if not self.cap.isOpened():
                 raise Exception(f"Could not open camera id {self.camera_id}")
+            
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            self.cap.set(cv2.CAP_PROP_FPS, 60) 
 
             self.is_running = True
             self.stop_event.clear()
@@ -214,7 +206,7 @@ class CameraProcessor:
             self.processing_thread.start()
             threading.Thread(target=self._tts_monitor, daemon=True).start()
 
-            self.log(f"Camera started (ID {self.camera_id})")
+            self.log(f"Camera started (ID {self.camera_id}) @ 60 FPS Request")
             self._gui_update_loop()
 
         except Exception as e:
@@ -358,21 +350,17 @@ class CameraProcessor:
             self.photo = ImageTk.PhotoImage(image=img)
             self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
             
-            # --- DISPLAY TEXT LOGIC (With Overrides) ---
+            # --- DISPLAY TEXT LOGIC ---
             if self.display_text_override:
-                # 1. Show "Translating..." or Gemini Result
                 final_text = self.display_text_override
-                color_to_use = "#00FF00" # Green for special status
+                color_to_use = "#00FF00" 
             elif self.raw_tokens:
-                # 2. Show Raw Tokens
                 final_text = " ".join(self.raw_tokens)
                 color_to_use = self.text_color
             else:
-                # 3. Default Prompt
                 final_text = "Start Signing..."
                 color_to_use = self.text_color
             
-            # Wrap Text
             chars_per_line = int(self.width / (self.text_size * 0.6))
             display_text = textwrap.fill(final_text, width=max(10, chars_per_line))
 
@@ -432,7 +420,7 @@ class CameraProcessor:
             self.canvas.tag_raise(self.hands_status_id)
             self.canvas.tag_raise(self.system_status_id)
 
-        self.canvas.after(16, self._gui_update_loop)
+        self.canvas.after(5, self._gui_update_loop)
 
     def extract_keypoints(self, results):
         hand_keypoints = np.zeros(LANDMARK_DIM, dtype=np.float32)
@@ -463,43 +451,23 @@ class CameraProcessor:
             if self.hands_lost_time is not None:
                 duration_hands_gone = time.time() - self.hands_lost_time
                 if duration_hands_gone >= 2.0:
-                    # --- TRIGGER SMART PIPELINE ---
                     self._trigger_gemini_pipeline(" (Hands Gone > 2.0s)")
 
     def _trigger_gemini_pipeline(self, reason=""):
-        """Orchestrates Gemini Correction -> UI Update -> TTS -> Reset"""
         if self.draft_text and self.tts_enabled:
-            # We spawn a dedicated thread for the whole sequence so it doesn't block camera
+            # Use the new handler thread spawning
             threading.Thread(target=self._process_llm_and_speak, args=(self.draft_text,), daemon=True).start()
-            self.draft_text = "" # Prevent double trigger
+            self.draft_text = "" 
 
     def _process_llm_and_speak(self, raw_text):
-        """
-        1. Ask Gemini to fix grammar
-        2. Show fixed text on screen
-        3. Speak fixed text
-        4. Clear screen
-        """
-        final_text = raw_text
-        
-        # 1. CALL GEMINI (If available)
-        if self.llm_model:
-            self.display_text_override = "Gemini: Translating..."
-            self.log(f"Gemini: Refining '{raw_text}'...")
-            try:
-                prompt = f"Translate ASL Gloss to English: \"{raw_text}\". Output ONLY the sentence."
-                response = self.llm_model.generate_content(prompt)
-                
-                if response.text:
-                    final_text = response.text.strip()
-                    self.log(f"Gemini Result: {final_text}")
-            except Exception as e:
-                self.log(f"Gemini Failed: {e}. Using raw text.")
+        # 1. DELEGATE TO LLM.PY
+        self.display_text_override = "Gemini: Translating..."
+        final_text = self.llm_handler.translate(raw_text)
         
         # 2. UPDATE UI
         self.display_text_override = final_text
         
-        # 3. SPEAK (Thread-safe)
+        # 3. SPEAK
         self._speak(final_text)
         
         # 4. RESET
@@ -529,20 +497,23 @@ class CameraProcessor:
                 del engine
 
                 virtual_device = 'CABLE Input (VB-Audio Virtual Cable)'
-                
                 try:
                     if mixer.get_init(): mixer.quit()
                     mixer.init(devicename=virtual_device)
                     mixer.Sound(temp_wav).play()
                     while mixer.get_busy(): time.sleep(0.1)
                     mixer.quit()
-                except Exception as mixer_e:
-                    self.log(f"Mixer Error: {mixer_e}. Falling back to default.")
+                except Exception:
+                    pass
+
+                try:
                     if mixer.get_init(): mixer.quit()
                     mixer.init()
                     mixer.Sound(temp_wav).play()
                     while mixer.get_busy(): time.sleep(0.1)
                     mixer.quit()
+                except Exception as e:
+                    self.log(f"Speaker Error: {e}")
                 
                 if os.path.exists(temp_wav):
                     os.remove(temp_wav)
@@ -551,6 +522,7 @@ class CameraProcessor:
                 self.log(f"TTS Routing Error: {e}")
 
     def _commit_to_sentence(self, action):
+        """Modified to treat 'J' and 'Z' from WordEngine as letters."""
         char_to_add = action
         
         if action == 'SPACE':
@@ -580,11 +552,18 @@ class CameraProcessor:
                 else:
                     self.raw_tokens[-1] += char_to_add
             else:
-                if not self.raw_tokens or self.raw_tokens[-1] != char_to_add:
-                    self.raw_tokens.append(char_to_add)
-                    self.force_new_token = False
+                if char_to_add.lower() in ['j', 'z']:
+                    if self.force_new_token or not self.raw_tokens:
+                         self.raw_tokens.append(char_to_add)
+                         self.force_new_token = False
+                    else:
+                         self.raw_tokens[-1] += char_to_add
                 else:
-                    self.log(f"Duplicate word '{char_to_add}' ignored")
+                    if not self.raw_tokens or self.raw_tokens[-1] != char_to_add:
+                        self.raw_tokens.append(char_to_add)
+                        self.force_new_token = False
+                    else:
+                        self.log(f"Duplicate word '{char_to_add}' ignored")
 
             self.draft_text = " ".join(self.raw_tokens)
             self.last_sign_time = time.time()
