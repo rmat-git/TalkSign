@@ -31,7 +31,7 @@ MISSING_HAND_TOLERANCE = 1.0
 MAX_QUEUE_SIZE = 2
 
 # API Key (Passed to the handler)
-GEMINI_API_KEY = "PLACE_APPI_KEY_HERE"
+GEMINI_API_KEY = "PLACE_YOUR_API_KEY_HERE"
 
 class CameraProcessor:
     def __init__(self, canvas, inference_model, log_callback,

@@ -7,8 +7,8 @@ import pandas as pd
 # ---------------------------------------------------------
 WORD_CLASSES = [
     "me", "you", "we", "they", "hello", 
-    "house", "friend", "yes", "no", "fine", "help", "meet", "good",
-    "want", "have", "like", "need", "go", "walk", 
+    "friend", "house", "yes", "no", "fine", "help", "meet", "good",
+    "want", "have", "like", "love", "go", "walk", 
     "play", "work", "learn", "eat", "drink", "finish",
     "book", "family", "school", "computer", "deaf", "j", "z"
 ]
