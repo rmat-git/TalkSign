@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+opencv-python
+mediapipe
+tensorflow
+numpy
+pillow
+pyvirtualcam
+google-generativeai
+pyttsx3
+pygame
+pygrabber
+pydantic

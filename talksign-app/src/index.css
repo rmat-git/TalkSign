@@ -1,0 +1,101 @@
+@import "tailwindcss";
+
+/* --- 1. CUSTOM FONT SETUP --- */
+@font-face {
+  font-family: 'Rubik';
+  src: url('./presets/fonts/Rubik-Regular.ttf') format('truetype'); 
+  font-weight: normal;
+  font-style: normal;
+}
+
+/* --- 2. GLOBAL RESETS & THEME --- */
+:root {
+  font-family: 'Rubik', 'Inter', system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  background-color: #F5F5F0; 
+  color: #111111;
+}
+
+*, button, input, select, textarea {
+  font-family: 'Rubik', sans-serif !important;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  overflow: hidden;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+/* --- 3. UI CUSTOMIZATION --- */
+
+/* Custom Scrollbar (Subtle) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent; 
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db; 
+  border-radius: 4px; /* Subtle radius */
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af; 
+}
+
+/* Range Slider Customization */
+input[type=range] {
+  -webkit-appearance: none; 
+  appearance: none;
+  background: transparent; 
+}
+
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 16px;
+  width: 16px;
+  border-radius: 50%; /* Thumbs usually stay round */
+  background: #000000;
+  margin-top: -6px; 
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+
+input[type=range]::-webkit-slider-runnable-track {
+  width: 100%;
+  height: 4px;
+  cursor: pointer;
+  background: #e5e7eb;
+  border-radius: 4px; /* Subtle radius */
+}
+
+input[type=range]::-moz-range-thumb {
+  height: 16px;
+  width: 16px;
+  border-radius: 50%;
+  background: #000000;
+  cursor: pointer;
+  border: none;
+}
+
+input[type=range]::-moz-range-track {
+  width: 100%;
+  height: 4px;
+  cursor: pointer;
+  background: #e5e7eb;
+  border-radius: 4px;
+}
