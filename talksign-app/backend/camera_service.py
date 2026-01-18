@@ -30,10 +30,10 @@ except ImportError:
 GEMINI_API_KEY = "AIzaSyDyFzKLeUBpkl3Wmj7TPTh9ufV-c5SaBoI" 
 SEQUENCE_LENGTH = 30
 LANDMARK_DIM = 63
-PREDICTION_THRESHOLD = 0.80
-COOLDOWN_FRAMES = 20
+ALPHABET_THRESHOLD = 85.0
+WORD_THRESHOLD = 75.0
 MAX_QUEUE_SIZE = 1  # Keep small: We only want the AI working on the *latest* frame
-HANDS_LOST_THRESHOLD = 2.0 
+HANDS_LOST_THRESHOLD = 0.85
 
 class CameraService:
     def __init__(self, inference_model):
@@ -68,7 +68,6 @@ class CameraService:
         self.data_lock = threading.Lock()
         
         self.stop_event = threading.Event()
-        # Queue now holds raw frames for the AI to process asynchronously
         self.frame_queue = Queue(maxsize=MAX_QUEUE_SIZE)
         self.processing_thread = None
         
@@ -82,6 +81,12 @@ class CameraService:
         self.hands_lost_time = None
         self.force_new_token = False
         self.showing_result = False  
+        
+        # --- NEW: SYSTEM LOGIC VARIABLES ---
+        self.prediction_history = []
+        self.STABILITY_FRAMES = 1
+        self.PREDICTION_COOLDOWN = 1.0
+        self.last_prediction_time = 0
         
         # --- Settings ---
         self.tts_enabled = True
@@ -201,6 +206,9 @@ class CameraService:
                     self.model_wrapper.load_model(WORD_FILE)
                     self.engine = WordEngine(self.model_wrapper)
                     self.status["mode"] = "word"
+                
+                # Reset Buffers on Mode Switch
+                self.prediction_history = []
                 self.frame_count = 0
                 self.force_new_token = True
                 print(f"System: Mode switched successfully to {mode}")
@@ -228,7 +236,7 @@ class CameraService:
         draw.text((x, y), text, font=font, fill=rgb, stroke_width=3, stroke_fill=(0, 0, 0))
         return np.array(pil_img)
 
-    # --- MAIN LOOP (NOW DECOUPLED & FAST) ---
+    # --- MAIN LOOP ---
     def generate_frames(self):
         while True:
             if not self.is_running: break
@@ -237,24 +245,17 @@ class CameraService:
                 success, frame = self.cap.read()
             if not success: break
             try:
-                # 1. Base Frame
                 frame_rgb_true = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 frame_rgb_mirror = cv2.flip(frame_rgb_true, 1)
                 
-                # 2. SEND TO AI (Non-Blocking)
-                # We try to push to the queue. If it's full (AI is busy), 
-                # we just skip this frame for AI processing but keep streaming video.
                 try:
                     self.frame_queue.put_nowait(frame_rgb_mirror)
                 except Full:
-                    pass # Drop frame for AI, keep video smooth
+                    pass 
                 
-                # 3. Draw Overlay (Fast)
-                # Uses self.status which is updated in the background
                 final_browser_frame = self._draw_overlay(frame_rgb_mirror)
                 final_vcam_frame_true = self._draw_overlay(frame_rgb_true)
                 
-                # 4. Virtual Camera
                 if self.vcam_enabled:
                     if self.vcam is None:
                         try:
@@ -263,15 +264,13 @@ class CameraService:
                     if self.vcam:
                         self.vcam.send(cv2.flip(final_vcam_frame_true, 1))
 
-                # 5. Browser Output
                 final_bgr = cv2.cvtColor(final_browser_frame, cv2.COLOR_RGB2BGR)
                 ret, buffer = cv2.imencode('.jpg', final_bgr)
                 yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
             except Exception: break
 
-    # --- AI WORKER LOOP (HANDLES HEAVY PROCESSING) ---
+    # --- AI WORKER LOOP ---
     def _ai_worker_loop(self):
-        # Initialize MediaPipe INSIDE the thread for safety
         holistic = mp_solutions.holistic.Holistic(
             min_detection_confidence=0.5, 
             min_tracking_confidence=0.5
@@ -279,87 +278,131 @@ class CameraService:
         
         while not self.stop_event.is_set():
             try:
-                # Wait for a frame (Blocking is fine here, it's a background thread)
                 frame_rgb = self.frame_queue.get(timeout=0.1)
-                
-                # 1. Heavy Inference
                 results = holistic.process(frame_rgb)
-                
-                # 2. Update Logic
                 self._process_logic(results)
-                
             except Empty: continue
             except Exception: pass
         
         holistic.close()
 
-    # --- AI LOGIC ---
+    # --- AI LOGIC (UPDATED) ---
     def _process_logic(self, results):
         if self.showing_result or self.status["llm_processing"]: return
         if results is None: 
             self._handle_missing_hands(True)
             return
 
+        # 1. Prediction Step
         if isinstance(self.engine, AlphabetEngine):
             keypoints, hand_detected = self.extract_keypoints(results)
             self.status["hands_detected"] = hand_detected
             if hand_detected:
                 self._handle_missing_hands(False)
                 action, confidence = self.engine.predict(keypoints)
+                is_confident = (confidence >= ALPHABET_THRESHOLD)
             else:
                 self._handle_missing_hands(True)
                 action, confidence = "...", 0.0
+                is_confident = False
         else:
             has_hands = bool(results.left_hand_landmarks or results.right_hand_landmarks)
             self.status["hands_detected"] = has_hands
             if has_hands:
                 self._handle_missing_hands(False)
                 action, confidence = self.engine.predict(results)
+                is_confident = (confidence >= WORD_THRESHOLD)
             else:
                 self._handle_missing_hands(True)
                 action, confidence = "...", 0.0
+                is_confident = False
 
-        self.frame_count += 1
-        self.status["is_cooldown"] = (self.frame_count < COOLDOWN_FRAMES)
-        
-        is_confident = False
-        if isinstance(self.engine, AlphabetEngine):
-            is_confident = (confidence >= PREDICTION_THRESHOLD * 100)
-        else:
-            is_confident = (confidence >= 75)
+        # 2. Time-Based Cooldown Check
+        time_since_last = time.time() - self.last_prediction_time
+        self.status["is_cooldown"] = (time_since_last < self.PREDICTION_COOLDOWN)
 
+        # 3. Stability Buffer Management
         ignore_list = ['NOTHING', 'Error', 'Thinking...', '...', 'Prediction Failed', 'NO HAND']
         
-        if (not self.status["is_cooldown"] and is_confident and action not in ignore_list):
-            self._commit_to_sentence(action)
-            self.frame_count = 0 
+        if is_confident and action not in ignore_list:
+            self.prediction_history.append(action)
+        else:
+            self.prediction_history.append(None)
+
+        if len(self.prediction_history) > self.STABILITY_FRAMES:
+            self.prediction_history.pop(0)
+
+        # 4. Check for 5 Consecutive Frames
+        if (len(self.prediction_history) == self.STABILITY_FRAMES and 
+            all(p == self.prediction_history[0] for p in self.prediction_history) and 
+            self.prediction_history[0] is not None):
+            
+            stable_action = self.prediction_history[0]
+            
+            # Commit if no cooldown
+            if not self.status["is_cooldown"]:
+                self._commit_to_sentence(stable_action)
+                self.last_prediction_time = time.time()
+                
+                # --- HARD RESET (CRITICAL FOR J/Z) ---
+                self.prediction_history = []
+                if hasattr(self.engine, 'sequence_buffer'):
+                    self.engine.sequence_buffer = []
 
         self.status["prediction"] = action
         self.status["confidence"] = float(confidence)
 
     def _handle_missing_hands(self, is_missing):
         if is_missing:
-            if self.hands_lost_time is None: self.hands_lost_time = time.time()
-        else: self.hands_lost_time = None
+            if self.hands_lost_time is None: 
+                self.hands_lost_time = time.time()
+            
+            # Clear buffer if hands gone too long
+            if time.time() - self.hands_lost_time > HANDS_LOST_THRESHOLD:
+                if self.prediction_history: self.prediction_history = []
+                if hasattr(self.engine, 'sequence_buffer'):
+                    self.engine.sequence_buffer = []
+        else: 
+            self.hands_lost_time = None
 
     def _commit_to_sentence(self, action):
         with self.data_lock:
             char_to_add = action
             if action == 'SPACE': char_to_add = ' '
             elif action == 'DELETE':
-                if self.raw_tokens: self.raw_tokens.pop()
+                # Smart Delete Logic
+                if isinstance(self.engine, AlphabetEngine):
+                    if self.raw_tokens:
+                        last_token = self.raw_tokens[-1]
+                        if len(last_token) > 0:
+                            self.raw_tokens[-1] = last_token[:-1] # Remove char
+                            if len(self.raw_tokens[-1]) == 0:
+                                self.raw_tokens.pop()
+                else:
+                    if self.raw_tokens: self.raw_tokens.pop() # Remove word
                 char_to_add = None
             
             if char_to_add:
-                if isinstance(self.engine, WordEngine):
-                    if not self.raw_tokens or self.raw_tokens[-1] != char_to_add:
-                        self.raw_tokens.append(char_to_add)
-                else:
+                if isinstance(self.engine, AlphabetEngine):
+                    # Alphabet Mode: Group letters
                     if self.force_new_token or not self.raw_tokens:
                         self.raw_tokens.append(char_to_add)
                         self.force_new_token = False
                     else:
                         self.raw_tokens[-1] += char_to_add
+                else:
+                    # Word Mode: Check for J/Z
+                    if char_to_add.lower() in ['J', 'Z']:
+                        if self.force_new_token or not self.raw_tokens:
+                             self.raw_tokens.append(char_to_add)
+                             self.force_new_token = False
+                        else:
+                             self.raw_tokens[-1] += char_to_add
+                    else:
+                        # Normal Words
+                        if not self.raw_tokens or self.raw_tokens[-1] != char_to_add:
+                            self.raw_tokens.append(char_to_add)
+                            self.force_new_token = False
 
             if not self.showing_result:
                 self.status["sentence"] = " ".join(self.raw_tokens)
@@ -430,10 +473,16 @@ class CameraService:
                     while mixer.get_busy(): time.sleep(0.1)
                     mixer.quit()
                 except Exception:
+                    pass # Ignore if virtual cable missing
+                
+                # Always play to default speakers too
+                try:
                     if mixer.get_init(): mixer.quit()
                     mixer.init()
                     mixer.Sound(temp_wav).play()
                     while mixer.get_busy(): time.sleep(0.1)
                     mixer.quit()
+                except Exception: pass
+
                 if os.path.exists(temp_wav): os.remove(temp_wav)
             except Exception as e: print(f"Speaker Error: {e}")
