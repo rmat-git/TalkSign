@@ -3,6 +3,7 @@ import numpy as np
 import threading
 import time
 import os
+import textwrap
 import mediapipe as mp
 from mediapipe import solutions as mp_solutions
 from queue import Queue, Empty, Full
@@ -27,12 +28,12 @@ except ImportError:
     GeminiHandler = None
 
 # --- CONFIGURATION ---
-GEMINI_API_KEY = "AIzaSyDyFzKLeUBpkl3Wmj7TPTh9ufV-c5SaBoI" 
+GEMINI_API_KEY = "AIzaSyAyFjwaqSPCWCI-8d_9PfEjzm4hBdr-gPo" 
 SEQUENCE_LENGTH = 30
 LANDMARK_DIM = 63
-ALPHABET_THRESHOLD = 85.0
-WORD_THRESHOLD = 75.0
-MAX_QUEUE_SIZE = 1  # Keep small: We only want the AI working on the *latest* frame
+ALPHABET_THRESHOLD = 90.0
+WORD_THRESHOLD = 80.0
+MAX_QUEUE_SIZE = 1  
 HANDS_LOST_THRESHOLD = 0.85
 
 class CameraService:
@@ -53,7 +54,7 @@ class CameraService:
         self.text_enabled = True
         self.text_size = 40
         self.text_color = "#FFFFFF"
-        self.text_position = 10 
+        self.text_position = 0 
         
         # --- Font Setup ---
         self.font_path_custom = os.path.join(os.getcwd(), "presets", "fonts", "Rubik-Regular.ttf")
@@ -82,7 +83,7 @@ class CameraService:
         self.force_new_token = False
         self.showing_result = False  
         
-        # --- NEW: SYSTEM LOGIC VARIABLES ---
+        # --- Logic Variables ---
         self.prediction_history = []
         self.STABILITY_FRAMES = 1
         self.PREDICTION_COOLDOWN = 1.0
@@ -99,7 +100,6 @@ class CameraService:
         else:
             self.llm_handler = None
 
-        # Helper for keypoint extraction logic
         self.mp_holistic_utils = mp_solutions.holistic
 
     # --- INPUT MANAGEMENT ---
@@ -207,7 +207,6 @@ class CameraService:
                     self.engine = WordEngine(self.model_wrapper)
                     self.status["mode"] = "word"
                 
-                # Reset Buffers on Mode Switch
                 self.prediction_history = []
                 self.frame_count = 0
                 self.force_new_token = True
@@ -215,28 +214,41 @@ class CameraService:
             except Exception as e:
                 print(f"Error switching modes: {e}")
 
-    # --- TEXT RENDERING ---
+    # --- TEXT RENDERING (WRAPPER ENABLED) ---
     def _draw_overlay(self, frame_rgb):
         if not self.text_enabled: return frame_rgb
-        text = self.status["sentence"]
-        if not text: text = "WAITING FOR INPUT..."
+        
+        raw_text = self.status["sentence"]
+        if not raw_text: raw_text = "WAITING FOR INPUT..."
+        
+        # 1. Wrap Logic (20 chars)
+        wrapped_text = textwrap.fill(raw_text, width=20)
+
         pil_img = Image.fromarray(frame_rgb)
         draw = ImageDraw.Draw(pil_img)
+        
         try:
             font_size = int(self.text_size * 2.0)
             try: font = ImageFont.truetype(self.font_path_custom, font_size)
             except OSError: font = ImageFont.truetype(self.font_path_system, font_size)
         except OSError: font = ImageFont.load_default()
+        
         W, H = pil_img.size
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        x, y = (W - text_w) // 2, H - (H * (self.text_position / 100)) - text_h - 40 
+        
+        bbox = draw.multiline_textbbox((0, 0), wrapped_text, font=font, align='center')
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        
+        x = (W - text_w) // 2
+        y = H - (H * (self.text_position / 100)) - text_h - 40 
+        
         try: hex_c = self.text_color.lstrip('#'); rgb = tuple(int(hex_c[i:i+2], 16) for i in (0, 2, 4))
         except: rgb = (255, 255, 255)
-        draw.text((x, y), text, font=font, fill=rgb, stroke_width=3, stroke_fill=(0, 0, 0))
+        
+        draw.multiline_text((x, y), wrapped_text, font=font, fill=rgb, stroke_width=3, stroke_fill=(0, 0, 0), align='center')
         return np.array(pil_img)
 
-    # --- MAIN LOOP ---
+    # --- MAIN LOOP (FLIP FIX RESTORED) ---
     def generate_frames(self):
         while True:
             if not self.is_running: break
@@ -245,25 +257,33 @@ class CameraService:
                 success, frame = self.cap.read()
             if not success: break
             try:
+                # 1. Base Frame
                 frame_rgb_true = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # 2. Mirror FIRST (This is what you see in browser)
                 frame_rgb_mirror = cv2.flip(frame_rgb_true, 1)
                 
-                try:
-                    self.frame_queue.put_nowait(frame_rgb_mirror)
-                except Full:
-                    pass 
+                # 3. AI Processing
+                try: self.frame_queue.put_nowait(frame_rgb_mirror)
+                except Full: pass 
                 
+                # 4. Draw Overlay on MIRRORED Frame
+                # Result: [Mirrored Camera] + [Normal Text]
                 final_browser_frame = self._draw_overlay(frame_rgb_mirror)
-                final_vcam_frame_true = self._draw_overlay(frame_rgb_true)
                 
+                # 5. Virtual Camera Output
                 if self.vcam_enabled:
                     if self.vcam is None:
                         try:
-                            self.vcam = pyvirtualcam.Camera(width=final_vcam_frame_true.shape[1], height=final_vcam_frame_true.shape[0], fps=30)
+                            self.vcam = pyvirtualcam.Camera(width=final_browser_frame.shape[1], height=final_browser_frame.shape[0], fps=30)
                         except Exception: self.vcam_enabled = False
                     if self.vcam:
-                        self.vcam.send(cv2.flip(final_vcam_frame_true, 1))
+                        # KEY FIX: Flip the Browser Frame (Mirroring it AGAIN)
+                        # Sent to Zoom: [Normal Camera] + [Backwards Text]
+                        # Zoom Self-View Mirrors it Back to: [Mirrored Camera] + [Normal Text]
+                        self.vcam.send(cv2.flip(final_browser_frame, 1))
 
+                # 6. Browser Output (No extra flip needed, already perfect)
                 final_bgr = cv2.cvtColor(final_browser_frame, cv2.COLOR_RGB2BGR)
                 ret, buffer = cv2.imencode('.jpg', final_bgr)
                 yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
@@ -271,11 +291,7 @@ class CameraService:
 
     # --- AI WORKER LOOP ---
     def _ai_worker_loop(self):
-        holistic = mp_solutions.holistic.Holistic(
-            min_detection_confidence=0.5, 
-            min_tracking_confidence=0.5
-        )
-        
+        holistic = mp_solutions.holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         while not self.stop_event.is_set():
             try:
                 frame_rgb = self.frame_queue.get(timeout=0.1)
@@ -283,17 +299,15 @@ class CameraService:
                 self._process_logic(results)
             except Empty: continue
             except Exception: pass
-        
         holistic.close()
 
-    # --- AI LOGIC (UPDATED) ---
+    # --- AI LOGIC ---
     def _process_logic(self, results):
         if self.showing_result or self.status["llm_processing"]: return
         if results is None: 
             self._handle_missing_hands(True)
             return
 
-        # 1. Prediction Step
         if isinstance(self.engine, AlphabetEngine):
             keypoints, hand_detected = self.extract_keypoints(results)
             self.status["hands_detected"] = hand_detected
@@ -317,11 +331,9 @@ class CameraService:
                 action, confidence = "...", 0.0
                 is_confident = False
 
-        # 2. Time-Based Cooldown Check
         time_since_last = time.time() - self.last_prediction_time
         self.status["is_cooldown"] = (time_since_last < self.PREDICTION_COOLDOWN)
 
-        # 3. Stability Buffer Management
         ignore_list = ['NOTHING', 'Error', 'Thinking...', '...', 'Prediction Failed', 'NO HAND']
         
         if is_confident and action not in ignore_list:
@@ -332,19 +344,14 @@ class CameraService:
         if len(self.prediction_history) > self.STABILITY_FRAMES:
             self.prediction_history.pop(0)
 
-        # 4. Check for 5 Consecutive Frames
         if (len(self.prediction_history) == self.STABILITY_FRAMES and 
             all(p == self.prediction_history[0] for p in self.prediction_history) and 
             self.prediction_history[0] is not None):
             
             stable_action = self.prediction_history[0]
-            
-            # Commit if no cooldown
             if not self.status["is_cooldown"]:
                 self._commit_to_sentence(stable_action)
                 self.last_prediction_time = time.time()
-                
-                # --- HARD RESET (CRITICAL FOR J/Z) ---
                 self.prediction_history = []
                 if hasattr(self.engine, 'sequence_buffer'):
                     self.engine.sequence_buffer = []
@@ -354,44 +361,35 @@ class CameraService:
 
     def _handle_missing_hands(self, is_missing):
         if is_missing:
-            if self.hands_lost_time is None: 
-                self.hands_lost_time = time.time()
-            
-            # Clear buffer if hands gone too long
+            if self.hands_lost_time is None: self.hands_lost_time = time.time()
             if time.time() - self.hands_lost_time > HANDS_LOST_THRESHOLD:
                 if self.prediction_history: self.prediction_history = []
-                if hasattr(self.engine, 'sequence_buffer'):
-                    self.engine.sequence_buffer = []
-        else: 
-            self.hands_lost_time = None
+                if hasattr(self.engine, 'sequence_buffer'): self.engine.sequence_buffer = []
+        else: self.hands_lost_time = None
 
     def _commit_to_sentence(self, action):
         with self.data_lock:
             char_to_add = action
             if action == 'SPACE': char_to_add = ' '
             elif action == 'DELETE':
-                # Smart Delete Logic
                 if isinstance(self.engine, AlphabetEngine):
                     if self.raw_tokens:
                         last_token = self.raw_tokens[-1]
                         if len(last_token) > 0:
-                            self.raw_tokens[-1] = last_token[:-1] # Remove char
-                            if len(self.raw_tokens[-1]) == 0:
-                                self.raw_tokens.pop()
+                            self.raw_tokens[-1] = last_token[:-1] 
+                            if len(self.raw_tokens[-1]) == 0: self.raw_tokens.pop()
                 else:
-                    if self.raw_tokens: self.raw_tokens.pop() # Remove word
+                    if self.raw_tokens: self.raw_tokens.pop()
                 char_to_add = None
             
             if char_to_add:
                 if isinstance(self.engine, AlphabetEngine):
-                    # Alphabet Mode: Group letters
                     if self.force_new_token or not self.raw_tokens:
                         self.raw_tokens.append(char_to_add)
                         self.force_new_token = False
                     else:
                         self.raw_tokens[-1] += char_to_add
                 else:
-                    # Word Mode: Check for J/Z
                     if char_to_add.lower() in ['J', 'Z']:
                         if self.force_new_token or not self.raw_tokens:
                              self.raw_tokens.append(char_to_add)
@@ -399,7 +397,6 @@ class CameraService:
                         else:
                              self.raw_tokens[-1] += char_to_add
                     else:
-                        # Normal Words
                         if not self.raw_tokens or self.raw_tokens[-1] != char_to_add:
                             self.raw_tokens.append(char_to_add)
                             self.force_new_token = False
@@ -457,7 +454,7 @@ class CameraService:
         with self.audio_lock:
             try:
                 engine = pyttsx3.init()
-                engine.setProperty('rate', 145) 
+                engine.setProperty('rate', 115) 
                 voices = engine.getProperty('voices')
                 if len(voices) > 1 and self.voice_type == "F": engine.setProperty('voice', voices[1].id)
                 else: engine.setProperty('voice', voices[0].id)
@@ -472,17 +469,7 @@ class CameraService:
                     mixer.Sound(temp_wav).play()
                     while mixer.get_busy(): time.sleep(0.1)
                     mixer.quit()
-                except Exception:
-                    pass # Ignore if virtual cable missing
-                
-                # Always play to default speakers too
-                try:
-                    if mixer.get_init(): mixer.quit()
-                    mixer.init()
-                    mixer.Sound(temp_wav).play()
-                    while mixer.get_busy(): time.sleep(0.1)
-                    mixer.quit()
                 except Exception: pass
-
+            
                 if os.path.exists(temp_wav): os.remove(temp_wav)
             except Exception as e: print(f"Speaker Error: {e}")
