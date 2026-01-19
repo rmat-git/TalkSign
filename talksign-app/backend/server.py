@@ -3,9 +3,20 @@ import os
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
+
+# Load environment variables from .env file at the project root
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+dotenv_path = os.path.join(project_root, '.env')
+if os.path.exists(dotenv_path):
+    print(f"System: Loading environment variables from {dotenv_path}")
+    load_dotenv(dotenv_path=dotenv_path)
+else:
+    print("System: .env file not found. Relying on system environment variables.")
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -16,7 +27,21 @@ except ImportError as e:
     print(f"\nCRITICAL IMPORT ERROR: {e}")
     sys.exit(1)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Code to run on startup
+    print("System: Backend Starting...")
+    try:
+        camera_service.start_camera(0)
+    except Exception as e:
+        print(f"Error opening default camera: {e}")
+    
+    yield
+    
+    # Code to run on shutdown
+    print("System: Shutting down...")
+    camera_service.stop_camera()
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,19 +67,6 @@ class SettingsRequest(BaseModel):
     textSize: Optional[int] = None
     textColor: Optional[str] = None
     textPosition: Optional[int] = None
-
-@app.on_event("startup")
-def startup_event():
-    print("System: Backend Starting...")
-    try:
-        camera_service.start_camera(0)
-    except Exception as e:
-        print(f"Error opening default camera: {e}")
-
-@app.on_event("shutdown")
-def shutdown_event():
-    print("System: Shutting down...")
-    camera_service.stop_camera()
 
 # --- ROUTES ---
 @app.get("/cameras")

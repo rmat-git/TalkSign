@@ -27,12 +27,17 @@ except ImportError:
     print("WARNING: app.llm not found. Gemini features will be disabled.")
     GeminiHandler = None
 
+# --- OPTIMIZATION CONFIG ---
+AI_WORKER_MODEL_COMPLEXITY = 0 
+AI_FRAME_SKIP = 0 
+
 # --- CONFIGURATION ---
-GEMINI_API_KEY = "AIzaSyC0oZbD2xRQFM0ZSa8VZzCcqPgvzvnu3M8" 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 SEQUENCE_LENGTH = 30
 LANDMARK_DIM = 63
-ALPHABET_THRESHOLD = 60.0
-WORD_THRESHOLD = 90.0
+ALPHABET_THRESHOLD = 90.0
+WORD_THRESHOLD = 70.0
+ALPHABET_STABILITY_FRAMES = 3 # Number of frames a letter must be held to be recognized
 MAX_QUEUE_SIZE = 2  
 HANDS_LOST_THRESHOLD = 0.85
 
@@ -85,7 +90,6 @@ class CameraService:
         
         # --- Logic Variables ---
         self.prediction_history = []
-        self.STABILITY_FRAMES = 1
         self.PREDICTION_COOLDOWN = 1.0
         self.last_prediction_time = 0
         
@@ -96,7 +100,13 @@ class CameraService:
         # --- AI Handlers ---
         self.engine = AlphabetEngine(self.model_wrapper)
         if GeminiHandler:
-            self.llm_handler = GeminiHandler(GEMINI_API_KEY, print)
+            if GEMINI_API_KEY:
+                self.llm_handler = GeminiHandler(GEMINI_API_KEY, print)
+                # Add a confirmation log that the key was found
+                print(f"System: Found GEMINI_API_KEY ending in '...{GEMINI_API_KEY[-4:]}'. Initializing Gemini.")
+            else:
+                print("WARNING: GEMINI_API_KEY environment variable not set. Gemini features will be disabled.")
+                self.llm_handler = None
         else:
             self.llm_handler = None
 
@@ -152,8 +162,9 @@ class CameraService:
                 self.cap = None
                 return
 
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            # Set a single resolution for both display and AI processing
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 854)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             self.cap.set(cv2.CAP_PROP_FPS, 30)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -263,9 +274,14 @@ class CameraService:
                 # 2. Mirror FIRST (This is what you see in browser)
                 frame_rgb_mirror = cv2.flip(frame_rgb_true, 1)
                 
-                # 3. AI Processing
-                try: self.frame_queue.put_nowait(frame_rgb_mirror)
-                except Full: pass 
+                # 3. AI Processing (with frame skipping for performance)
+                self.frame_count += 1
+                if self.frame_count > AI_FRAME_SKIP:
+                    try:
+                        self.frame_queue.put_nowait(frame_rgb_mirror)
+                        self.frame_count = 0
+                    except Full: 
+                        pass # If AI is busy, drop frame
                 
                 # 4. Draw Overlay on MIRRORED Frame
                 # Result: [Mirrored Camera] + [Normal Text]
@@ -291,7 +307,11 @@ class CameraService:
 
     # --- AI WORKER LOOP ---
     def _ai_worker_loop(self):
-        holistic = mp_solutions.holistic.Holistic(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+        holistic = mp_solutions.holistic.Holistic(
+            model_complexity=AI_WORKER_MODEL_COMPLEXITY, 
+            min_detection_confidence=0.5, 
+            min_tracking_confidence=0.5
+        )
         while not self.stop_event.is_set():
             try:
                 frame_rgb = self.frame_queue.get(timeout=0.1)
@@ -337,14 +357,30 @@ class CameraService:
         ignore_list = ['NOTHING', 'Error', 'Thinking...', '...', 'Prediction Failed', 'NO HAND']
         
         if is_confident and action not in ignore_list:
+            # --- OPTIMIZATION FOR WORD MODEL ---
+            # For the WordEngine, a single confident prediction from a sequence is already "stable".
+            # We can commit it immediately instead of waiting for STABILITY_FRAMES.
+            if isinstance(self.engine, WordEngine) and not self.status["is_cooldown"]:
+                self._commit_to_sentence(action)
+                self.last_prediction_time = time.time()
+                self.prediction_history = []
+                if hasattr(self.engine, 'sequence_buffer'):
+                    # Reverting to a full buffer flush. The partial flush optimization caused repeat
+                    # predictions, which prevented new words from being added to the sentence.
+                    self.engine.sequence_buffer = []
+                # Update status and exit early to bypass the alphabet stability logic
+                self.status["prediction"] = action
+                self.status["confidence"] = float(confidence)
+                return
+
             self.prediction_history.append(action)
         else:
             self.prediction_history.append(None)
 
-        if len(self.prediction_history) > self.STABILITY_FRAMES:
+        if len(self.prediction_history) > ALPHABET_STABILITY_FRAMES:
             self.prediction_history.pop(0)
 
-        if (len(self.prediction_history) == self.STABILITY_FRAMES and 
+        if (len(self.prediction_history) == ALPHABET_STABILITY_FRAMES and 
             all(p == self.prediction_history[0] for p in self.prediction_history) and 
             self.prediction_history[0] is not None):
             
@@ -423,10 +459,11 @@ class CameraService:
         with self.data_lock:
             if not self.raw_tokens: return False
             self.showing_result = True
+            self.status["sentence"] = "Processing..." # Add feedback for the user
             self.status["llm_processing"] = True
             text_to_process = " ".join(self.raw_tokens)
             self.raw_tokens = [] 
-            self.status["sentence"] = "" 
+            
         threading.Thread(target=self._process_llm_and_speak, args=(text_to_process,)).start()
         return True
 
@@ -440,7 +477,8 @@ class CameraService:
             print(f"Gemini Output: {final_text}")
             with self.data_lock: self.status["sentence"] = final_text
             self._speak(final_text)
-            time.sleep(1.0)
+            # Increase sleep time to allow the user to read the corrected sentence
+            time.sleep(3.0)
             with self.data_lock: self.status["sentence"] = "" 
         except Exception as e:
             print(f"LLM/TTS Error: {e}")
