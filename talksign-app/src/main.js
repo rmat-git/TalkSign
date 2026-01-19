@@ -11,7 +11,7 @@ const createWindow = () => {
     width: 1100,
     height: 690,
     useContentSize: true, // <--- This ensures the inner area is exactly 1100x690
-    resizable: false,
+    resizable: true,
     autoHideMenuBar: true,
     frame: true,
     webPreferences: {

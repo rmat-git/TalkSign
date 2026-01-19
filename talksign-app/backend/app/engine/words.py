@@ -18,7 +18,7 @@ class WordEngine:
         self.inference_model = inference_model
         self.sequence_buffer = []
         self.sequence_length = 30  # Must have 30 frames minimum (deployment standard)
-        self.threshold = 0.75  # 85% confidence threshold
+        self.threshold = 0.60
         self.num_landmarks = 75  # 33 pose + 21 left hand + 21 right hand
 
     def extract_body_landmarks(self, results):
