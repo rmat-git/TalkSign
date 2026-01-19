@@ -28,7 +28,7 @@ except ImportError:
     GeminiHandler = None
 
 # --- CONFIGURATION ---
-GEMINI_API_KEY = "AIzaSyAyFjwaqSPCWCI-8d_9PfEjzm4hBdr-gPo" 
+GEMINI_API_KEY = "API KEY HERE" 
 SEQUENCE_LENGTH = 30
 LANDMARK_DIM = 63
 ALPHABET_THRESHOLD = 90.0
